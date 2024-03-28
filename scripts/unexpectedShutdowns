@@ -1,3 +1,5 @@
+# Detects Unexpected Shutdowns and Alerts via SyncroRMM with Customizable Timeframe
+
 Import-Module $env:SyncroModule
 
 # Add the following Syncro Script Variable (Type: 'Dropdown')...

@@ -1,0 +1,46 @@
+Import-Module $env:SyncroModule
+
+# Add the following Syncro Script Variable (Type: 'Dropdown')...
+
+# How many <HOURS> back to check for unexpected shutdowns
+# Name: $timeToCheckHours 
+# Dropdown values: 0, 12, 24
+
+# How many <DAYS> back to check for unexpected shutdowns
+# Name: $timeToCheckDays
+# Dropdown values: 0, 1, 7, 14, 30
+
+# Example for dropdown defaults when running the script on a once per day schedule:
+# $timeToCheckHours Default=0
+# $timeToCheckDays Default=1
+
+# Calculate the time to start checking from
+$timeToCheckFrom = (Get-Date).AddHours(-$timeToCheckHours).AddDays(-$timeToCheckDays)
+
+# Check the System event log for unexpected shutdown entries
+$unexpectedShutdowns = Get-EventLog -LogName System -After $timeToCheckFrom | Where-Object { $_.EventID -eq 6008 -or $_.EventID -eq 41 }
+
+# If unexpected shutdowns are found, prepare alert
+if ($unexpectedShutdowns) {
+    $details = $unexpectedShutdowns | ForEach-Object {
+        $time = $_.TimeGenerated
+        $eventID = $_.EventID
+        "Time: $time`r`nEvent ID: $eventID"
+    }
+
+    $detailsText = $details -join "`r`n"
+    $alertTitle = "Monitoring - Unexpected Shutdowns Found"
+    $alertMessage = "An unexpected shutdown was detected within the last $($timeToCheckDays) days and $($timeToCheckHours) hours.`r`nNumber of Events: $($unexpectedShutdowns.Count)`r`nEvent Details:`r`n$detailsText"
+    
+    # Trigger an Rmm-Alert in Syncro
+    Rmm-Alert -Category $alertTitle -Body $alertMessage
+    Log-Activity -Message $alertMessage -EventName $alertTitle
+    Write-Host $alertMessage
+    exit 0
+} else {
+    $alertTitle = "Monitoring - No Unexpected Shutdowns Found"
+    $noAlertsMessage = "No unexpected shutdowns have been detected within the last $($timeToCheckDays) days and $($timeToCheckHours) hours."
+    Log-Activity -Message $noAlertsMessage -EventName $alertTitle
+    Write-Host $noAlertsMessage
+    exit 0
+}

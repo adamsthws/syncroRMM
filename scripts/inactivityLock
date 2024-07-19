@@ -1,0 +1,48 @@
+#   Features
+# - Sets the Windows inactivity timeout for automatic screen locking. 
+# - Verifies successful application of the setting, logs results and alerts on failures
+
+#   Note
+# - Must be run as SYSTEM
+
+Import-Module $env:SyncroModule
+
+# Set the timeout in minutes
+$TimeOutMinutes = 30
+
+# Convert minutes to seconds
+$TimeOutSeconds = $TimeOutMinutes * 60
+
+# Define the registry path and value name
+$RegistryPath = "HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\System"
+$ValueName = "InactivityTimeoutSecs"
+
+# Check if the registry key exists, if not create it
+if (-not (Test-Path $RegistryPath)) {
+    New-Item -Path $RegistryPath -Force | Out-Null
+}
+
+# Set the registry value
+Set-ItemProperty -Path $RegistryPath -Name $ValueName -Value $TimeOutSeconds -Type DWORD -Force
+
+# Verify the change
+$VerifyValue = Get-ItemProperty -Path $RegistryPath -Name $ValueName -ErrorAction SilentlyContinue
+
+# Define message templates
+$SuccessMessage = "Idle-time inactivity lock settings. $TimeOutMinutes minute lock applied/verified."
+$FailureMessage = "Failed to set or verify idle-time inactivity lock settings."
+$EventName = "Idle Time - Inactivity Lock"
+
+if ($null -eq $VerifyValue -or $null -eq $VerifyValue.$ValueName -or $VerifyValue.$ValueName -ne $TimeOutSeconds) {
+    if ($null -eq $VerifyValue -or $null -eq $VerifyValue.$ValueName) {
+        $StatusMessage = $FailureMessage + " The registry key or value does not exist."
+    } else {
+        $StatusMessage = $FailureMessage + " Current value: $($VerifyValue.$ValueName) seconds"
+    }
+    Write-Host $StatusMessage
+    Log-Activity -Message $StatusMessage -EventName $EventName
+    Rmm-Alert -Category $EventName -Body $StatusMessage
+} else {
+    Write-Host $SuccessMessage
+    Log-Activity -Message $SuccessMessage -EventName $EventName
+}

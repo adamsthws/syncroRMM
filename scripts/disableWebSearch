@@ -1,0 +1,41 @@
+# Features
+# - Disables Web/Edge/Bing suggestions in Windows search
+# - Verifies successful application of the setting, logs results and alerts on failures
+#
+# Note
+# - Must be run as SYSTEM
+
+Import-Module $env:SyncroModule
+
+# Define the registry path and value name
+$RegistryPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer"
+$ValueName = "DisableSearchBoxSuggestions"
+
+# Set the value to 1 to disable search box suggestions
+$Value = 1
+
+# Check if the registry key exists, if not create it
+if (-not (Test-Path $RegistryPath)) {
+    New-Item -Path $RegistryPath -Force | Out-Null
+}
+
+# Set the registry value
+Set-ItemProperty -Path $RegistryPath -Name $ValueName -Value $Value -Type DWORD -Force
+
+# Verify the change
+$VerifyValue = Get-ItemProperty -Path $RegistryPath -Name $ValueName -ErrorAction SilentlyContinue
+
+# Define message templates
+$SuccessMessage = "Web suggestions in Windows search have been disabled."
+$FailureMessage = "Failed to set or verify 'DisableSearchBoxSuggestions' registry setting."
+$EventName = "Search Suggestions"
+
+# Generate the log message or alert
+if ($null -eq $VerifyValue -or $null -eq $VerifyValue.$ValueName -or $VerifyValue.$ValueName -ne $Value) {
+    Write-Host $FailureMessage
+    Log-Activity -Message $FailureMessage -EventName $EventName
+    Rmm-Alert -Category $EventName -Body $FailureMessage
+} else {
+    Write-Host $SuccessMessage
+    Log-Activity -Message $SuccessMessage -EventName $EventName
+}

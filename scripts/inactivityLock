@@ -33,6 +33,7 @@ $SuccessMessage = "Idle-time inactivity lock settings. $TimeOutMinutes minute lo
 $FailureMessage = "Failed to set or verify idle-time inactivity lock settings."
 $EventName = "Idle Time - Inactivity Lock"
 
+# Generate the log message or alert
 if ($null -eq $VerifyValue -or $null -eq $VerifyValue.$ValueName -or $VerifyValue.$ValueName -ne $TimeOutSeconds) {
     if ($null -eq $VerifyValue -or $null -eq $VerifyValue.$ValueName) {
         $StatusMessage = $FailureMessage + " The registry key or value does not exist."

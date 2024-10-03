@@ -146,10 +146,6 @@ $disablePayment = "false"
 
 
 <# Comma seperated list of automatically installed browser extensions IDs
-Note that if you set this policy and then later remove an extension, it will be
-automatically removed from all computers that previously received the policy.
-To disable, simply remove all IDs from the list.
-("ExtensionInstallForcelist" policy) 
 To get extension IDs, browse to the extension in the Chrome Web Store, then grab
 the seemingly random string at the end of the url before the question mark
 (if there is a question mark, otherwise just the random string at the end) 
@@ -180,7 +176,7 @@ $setAllowList = "true"
 <# Chrome extensions: #>
 
 $allowedExtensions = @"
-# Ublock Origin:cjpalhdlnbpafiamejdnhcphjbkeiagm
+# Ublock Origin:cjpalhdlnbpafiamejdnhcphjbkeiagm (Manifest v2 depricated)
 Ublock Origin Lite:ddkjiahejlhfcafbddmgiahcphecmpfh
 HTTPSeverywhere:gcbommkclmclpchllfjekcdonpmejbdp
 Microsoft Defender Browser Protection:bkbeeeffjjeopflfhgeknacdieedcoml
@@ -234,7 +230,7 @@ Chrome Remote Desktop:inomeogfingihgjfjlpeplalcfajhgai
 
 <# Edge allowed extensions: #>
 $allowedExtensionsEdge = @"
-Ublock Origin:odfafepnkmbhccpbejgmiehpchacaeak
+# Ublock Origin:odfafepnkmbhccpbejgmiehpchacaeak (Manifest v2 depricated)
 Ublock Origin Lite:cimighlppcgcoapaliogpjjdehbnofhn
 HTTPSeverywhere:fchjpkplmbeeeaaogdbhjbgbknjobohb
 LastPass:bbcinlkgjjkejfdpemiealijmmooekmp
@@ -550,6 +546,8 @@ if ($setAllowList -eq "true") {
         $ide = $arrE[$ie].Split(":")[1]
         Set-Val $EdgeRegistryBase\ExtensionInstallAllowlist $ne String $ide
     }
+    
+
     
 }else {
     Del-Key $ChromeRegistryBase\ExtensionInstallAllowlist

@@ -2,6 +2,8 @@
 # Adds the test date & time to the result.
 # Logs the result to the asset activity history.
 # Logs the result in an asset custom field.
+# Logs the result to a local log file.
+# Cleans up >12-months-old versions of local log file.
 
 # Inspired by:
 # https://github.com/asheroto/speedtest/blob/main/speedtest.ps1
@@ -105,6 +107,7 @@ function Remove-File {
     }
 }
 
+# Remove old zip files 
 function Remove-Files {
     param(
         [Parameter(Mandatory=$true)]
@@ -116,6 +119,7 @@ function Remove-Files {
     Remove-File -Path $folderPath
 }
 
+# Parse speedtest result - returns only download and upload speed
 function Parse-Result {
     param (
         [Parameter(Mandatory=$true)]
@@ -142,6 +146,7 @@ function Parse-Result {
     return "$downloadResult - $uploadResult"
 }
 
+# Parse speedtest result - returns detailed results inc jitter etc
 function Parse-Result-Verbose {
     param (
         [Parameter(Mandatory=$true)]
@@ -259,13 +264,13 @@ function Manage-LogFiles {
 try {
     # Initialize variables
     $dateUKformat = Get-Date -Format "dd/MM/yy - HH:mm"
-    $logDirectory = "C:\temp"
-    $baseLogFileName = "speedtest-log"
     $tempFolder = $env:TEMP
     $zipFilePath = Join-Path $tempFolder "speedtest-win64.zip"
     $extractFolderPath = Join-Path $tempFolder "speedtest-win64"
     
     # Set up logging
+    $logDirectory = "C:\temp"
+    $baseLogFileName = "speedtest-log"
     $logFile = Manage-LogFiles -logDirectory $logDirectory -baseLogFileName $baseLogFileName
 
     # Cleanup old versions from previous runs

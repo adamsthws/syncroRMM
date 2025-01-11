@@ -107,7 +107,7 @@ function Remove-File {
     }
 }
 
-# Remove old zip files 
+# Remove old zip files
 function Remove-Files {
     param(
         [Parameter(Mandatory=$true)]
@@ -131,13 +131,13 @@ function Parse-Result {
     $uploadRegex = "Upload:\s+(\d+\.\d+)\s+(\w+)"
 
     # Extracting and formatting download and upload speeds
-    $downloadResult = if ($result -match $downloadRegex) { 
-        "Down: $([math]::Round([double]$matches[1]))$($matches[2] -replace 'ps$', '')" 
+    $downloadResult = if ($result -match $downloadRegex) {
+        "Down: $([math]::Round([double]$matches[1]))$($matches[2] -replace 'ps$', '')"
     } else {
         "Down: N/A"
     }
-    $uploadResult = if ($result -match $uploadRegex) { 
-        "Up: $([math]::Round([double]$matches[1]))$($matches[2] -replace 'ps$', '')" 
+    $uploadResult = if ($result -match $uploadRegex) {
+        "Up: $([math]::Round([double]$matches[1]))$($matches[2] -replace 'ps$', '')"
     } else {
         "Up: N/A"
     }
@@ -152,40 +152,40 @@ function Parse-Result-Verbose {
         [Parameter(Mandatory=$true)]
         [string]$result
     )
-    
+
     # Get current date/time in UK format
     $dateUKformat = Get-Date -Format "dd/MM/yy - HH:mm"
-    
+
     # Initialize output array
     $outputLines = @()
-    
+
     # Add separator
     $outputLines += "---------------"
-    
+
     # Add Speedtest header
     $outputLines += "Ookla CLI Speedtest: $dateUKformat"
-    
+
     # Extract Server info - updated to handle multiple spaces and id
     if ($result -match 'Server:\s*(.*?)\s*\(id:') {
         $outputLines += "Server: $($matches[1])"
     } else {
         $outputLines += "Server: Not Available"
     }
-    
+
     # Extract ISP - updated to handle multiple spaces
     if ($result -match 'ISP:\s*(.*?)\s*[\r\n]') {
         $outputLines += "ISP: $($matches[1])"
     } else {
         $outputLines += "ISP: Not Available"
     }
-    
+
     # Extract Idle Latency with jitter details
     if ($result -match 'Idle Latency:\s*([\d.]+)\s*ms\s*\(jitter:\s*([\d.]+)ms,\s*low:\s*([\d.]+)ms,\s*high:\s*([\d.]+)ms\)') {
         $outputLines += "Idle Latency:    $($matches[1]) ms (jitter: $($matches[2])ms, low: $($matches[3])ms, high: $($matches[4])ms)"
     } else {
         $outputLines += "Idle Latency:    Not Available"
     }
-    
+
     # Extract Download speed and jitter - updated pattern
     if ($result -match 'Download:\s*([\d.]+)\s*([KMG]bps).*?\n.*?([\d.]+)\s*ms\s*\(jitter:\s*([\d.]+)ms,\s*low:\s*([\d.]+)ms,\s*high:\s*([\d.]+)ms\)') {
         $speed = "$($matches[1]) $($matches[2] -replace 'bps','b')"
@@ -193,7 +193,7 @@ function Parse-Result-Verbose {
     } else {
         $outputLines += "Download:    Not Available"
     }
-    
+
     # Extract Upload speed and jitter - updated pattern
     if ($result -match 'Upload:\s*([\d.]+)\s*([KMG]bps).*?\n.*?([\d.]+)\s*ms\s*\(jitter:\s*([\d.]+)ms,\s*low:\s*([\d.]+)ms,\s*high:\s*([\d.]+)ms\)') {
         $speed = "$($matches[1]) $($matches[2] -replace 'bps','b')"
@@ -201,17 +201,17 @@ function Parse-Result-Verbose {
     } else {
         $outputLines += "Upload:    Not Available"
     }
-    
+
     # Extract Packet Loss
     if ($result -match 'Packet Loss:\s*([\d.]+)%') {
         $outputLines += "Packet Loss:     $($matches[1])%"
     } else {
         $outputLines += "Packet Loss:     Not Available"
     }
-    
+
     # Add separator
     $outputLines += "---------------"
-    
+
     # Join all lines with newlines
     return $outputLines -join "`n"
 }
@@ -223,16 +223,16 @@ function Manage-LogFiles {
         [Parameter(Mandatory=$true)]
         [string]$baseLogFileName
     )
-    
+
     # Create log directory if it doesn't exist
     if (-not (Test-Path $logDirectory)) {
         New-Item -ItemType Directory -Path $logDirectory -Force | Out-Null
     }
-    
+
     $currentMonth = (Get-Date).ToString("MMMM")
     $logFile = Join-Path $logDirectory "$baseLogFileName.txt"
     $archivedLogFile = Join-Path $logDirectory "$baseLogFileName-$currentMonth.txt"
-    
+
     # Check if current log file exists
     if (Test-Path $logFile) {
         $lastWriteMonth = (Get-Item $logFile).LastWriteTime.Month
@@ -245,18 +245,18 @@ function Manage-LogFiles {
             Rename-Item -Path $logFile -NewName $archivedLogFile
         }
     }
-    
+
     # Handle log rotation - keep only last 12 months
     $oldLogs = Get-ChildItem -Path $logDirectory -Filter "$baseLogFileName-*.txt" |
         Sort-Object LastWriteTime -Descending
-    
+
     # If we have more than 12 logs, remove the excess
     if ($oldLogs.Count -gt 12) {
         $oldLogs | Select-Object -Skip 12 | ForEach-Object {
             Remove-Item $_.FullName -Force
         }
     }
-    
+
     return $logFile
 }
 
@@ -267,7 +267,7 @@ try {
     $tempFolder = $env:TEMP
     $zipFilePath = Join-Path $tempFolder "speedtest-win64.zip"
     $extractFolderPath = Join-Path $tempFolder "speedtest-win64"
-    
+
     # Set up logging
     $logDirectory = "C:\temp"
     $baseLogFileName = "speedtest-log"
@@ -277,7 +277,7 @@ try {
     Write-Output "Cleaning up any previous files..."
     Remove-Files -zipPath $zipFilePath -folderPath $extractFolderPath
 
-    # Download latest Ookla Speedtest CLI Tool
+    # Download latest Speedtest CLI Tool
     Write-Output "Downloading SpeedTest CLI..."
     $downloadLink = Get-SpeedTestDownloadLink
     if (-not $downloadLink) {
@@ -285,7 +285,7 @@ try {
     }
     Download-SpeedTestZip -downloadLink $downloadLink -destination $zipFilePath
 
-    # Extract Ookla Speedtest CLI Tool
+    # Extract Speedtest CLI Tool
     Write-Output "Extracting Zip File..."
     Extract-Zip -zipPath $zipFilePath -destination $extractFolderPath
 
@@ -296,27 +296,31 @@ try {
         throw "Speedtest executable not found at: $executablePath"
     }
     $speedtestResult = Run-SpeedTest -executablePath $executablePath -arguments $ScriptArgs
-    
+
     # Parse the results
     $parsedResult = Parse-Result -result $speedtestResult
     $parsedResultWithDate = "$dateUKformat | $parsedResult"
     $verboseResult = Parse-Result-Verbose -result $speedtestResult
     Write-Output $verboseResult
 
-    # Write parsed result to Syncro Asset and Syncro log
-    Write-Output "Updating Syncro asset and activity log..."
+    # Write parsed (basic) result to Syncro asset custom field
+    Write-Output "Updating Syncro asset custom field..."
     Set-Asset-Field -Name "Internet Speed" -Value "$parsedResultWithDate"
+
+    # Write parsed (basic) result to Syncro asset activity log
+    Write-Output "Updating Syncro asset activity log..."
     Log-Activity -Message "$parsedResultWithDate" -EventName "Internet Speed"
-    
-    # Write parsed verbose result to log file
+
+    # Write parsed (detailed) result to local log file
     Write-Output "Writing result to local log file: $logFile"
     Add-Content -Path $logFile -Value $verboseResult
-    
+
     # Cleanup
     Write-Output "Cleaning up temporary files..."
     Remove-Files -zipPath $zipFilePath -folderPath $extractFolderPath
     Write-Output "Done!"
-    
+
+# Handle any errors
 } catch {
     $errorMessage = "An error occurred: $_"
     Write-Error $errorMessage

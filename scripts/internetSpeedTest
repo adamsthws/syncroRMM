@@ -1,9 +1,18 @@
 # Will run a command line Ookla internet speed test.
-# Adds the test date & time to the result.
-# Logs the result to the asset activity history.
-# Logs the result in an asset custom field.
-# Logs the result to a local log file.
-# Cleans up >12-months-old versions of local log file.
+
+# Logging...
+    # Logs the result to a local log file. 
+    # Cleans up >12-months-old versions of local log file.
+    # Logs the result to the asset activity history.
+    # Logs the result in an asset custom field. 
+        # Must create custom asset field named: 'Internet Speed'
+
+# Randomised start times...
+    # Optionally Randomise start period so tests don't run at the same time as each other.
+    # If enabled, a random (up to 20 mins) delay is added.
+    # Add dropdown Script variable in Syncro: '$enableRandomiseStartTime'.
+    # Add two dropdown script values: 'true' & 'false'.
+    # If not set, script defaults to 'false'.
 
 # Inspired by:
 # https://github.com/asheroto/speedtest/blob/main/speedtest.ps1
@@ -150,10 +159,11 @@ function Parse-Result {
 function Parse-Result-Verbose {
     param (
         [Parameter(Mandatory=$true)]
-        [string]$result
+        [string]$result,
+        [Parameter(Mandatory=$true)]
+        [string]$dateUKformat
     )
-    # Get current date/time in UK format
-    $dateUKformat = Get-Date -Format "dd/MM/yy - HH:mm"
+    
     # Initialize output array
     $outputLines = @()
     # Add Speedtest header with padding
@@ -202,6 +212,7 @@ function Parse-Result-Verbose {
     return $outputLines -join "`n"
 }
 
+# Manages the creation, rotation and deletion of local log file(s)
 function Manage-LogFiles {
     param (
         [Parameter(Mandatory=$true)]
@@ -246,8 +257,35 @@ function Manage-LogFiles {
     return $logFile
 }
 
+# Randomise test start period so tests don't run at the same time as each other.
+function Initialize-RandomDelay {
+    [CmdletBinding()]
+    param(
+        [Parameter()]
+        $enabled
+    )
+
+    # If parameter is null or not provided, default to false
+    if ($enabled -eq $null) {
+        $enabled = false
+    }
+
+    if ($enabled -eq $true) {
+        $RandomDelay = Get-Random -Minimum 1 -Maximum 1200 # Seconds
+        Write-Output "The randomised delay for this test is $RandomDelay seconds..."
+        Start-Sleep -Seconds $RandomDelay
+    }
+    else {
+        Write-Output "Randomised delay is disabled - continuing without delay..."
+    }
+}
+
 # Main Script
 try {
+    
+    # Randomise test start period so tests don't run at the same time as each other.
+    Initialize-RandomDelay -enabled $enableRandomisedStartTime
+    
     # Initialize variables
     $dateUKformat = Get-Date -Format "dd/MM/yy - HH:mm"
     $tempFolder = $env:TEMP
@@ -258,7 +296,7 @@ try {
     $logDirectory = "C:\temp"
     $baseLogFileName = "speedtest-log"
     $logFile = Manage-LogFiles -logDirectory $logDirectory -baseLogFileName $baseLogFileName
-
+    
     # Cleanup old versions from previous runs
     Write-Output "Cleaning up any previous files..."
     Remove-Files -zipPath $zipFilePath -folderPath $extractFolderPath
@@ -286,7 +324,7 @@ try {
     # Parse the results
     $parsedResult = Parse-Result -result $speedtestResult
     $parsedResultWithDate = "$dateUKformat | $parsedResult"
-    $verboseResult = Parse-Result-Verbose -result $speedtestResult
+    $verboseResult = Parse-Result-Verbose -result $speedtestResult -dateUKformat $dateUKformat
     Write-Output $verboseResult
 
     # Write parsed (basic) result to Syncro asset custom field

@@ -270,7 +270,7 @@ function Initialize-RandomDelay {
 
     if ($enabled -eq $true) {
         $RandomDelay = Get-Random -Minimum 1 -Maximum $maxRandomDelay # Seconds
-        Write-Output "Randomised delay is enabled, continuing in $RandomDelay seconds..."
+        Write-Output "Randomised delay enabled, continuing in $RandomDelay seconds..."
         Start-Sleep -Seconds $RandomDelay
     }
     else {

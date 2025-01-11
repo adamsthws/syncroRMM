@@ -1,17 +1,20 @@
 # Will run a command line Ookla internet speed test.
 
 # Logging...
+    $logDirectory = "C:\temp"
     # Logs the result to a local log file. 
     # Cleans up >12-months-old versions of local log file.
     # Logs the result to the asset activity history.
     # Logs the result in an asset custom field. 
-        # You must create custom asset field named: 'Internet Speed'
+        # Must create custom asset field named: 'Internet Speed'
 
 # Randomised start times...
+    $maxRandomDelay = 1200 # Unit: seconds (eg. 1200 seconds = 20 minutes)
     # Optionally Randomise start period so tests don't run at the same time as each other.
-    # If enabled, a random (up to 20 mins) delay is added.
+    # If enabled, a randomised delay is added between 1 and n seconds.
     # Add dropdown Script variable in Syncro: '$enableRandomiseStartTime'.
     # Add two dropdown script values: 'true' & 'false'.
+    # 'Max Script Run Time' must be set to ($maxRandomDelay + 1) minutes.
     # If not set, script defaults to 'false'.
 
 # Inspired by:
@@ -265,37 +268,32 @@ function Initialize-RandomDelay {
         $enabled
     )
 
-    # If parameter is null or not provided, default to false
-    if ($enabled -eq $null) {
-        $enabled = false
-    }
-
     if ($enabled -eq $true) {
-        $RandomDelay = Get-Random -Minimum 1 -Maximum 1200 # Seconds
-        Write-Output "The randomised delay for this test is $RandomDelay seconds..."
+        $RandomDelay = Get-Random -Minimum 1 -Maximum $maxRandomDelay # Seconds
+        Write-Output "Randomised delay is enabled, continuing in $RandomDelay seconds..."
         Start-Sleep -Seconds $RandomDelay
     }
     else {
-        Write-Output "Randomised delay is disabled - continuing without delay..."
+        Write-Output "Randomised delay is not enabled, continuing without delay..."
     }
+}
+
+# Get current date and time in UK format
+function Get-CurrentDate-UKFormat {
+    Get-Date -Format "dd/MM/yy - HH:mm"
 }
 
 # Main Script
 try {
     
     # Randomise test start period so tests don't run at the same time as each other.
+    Write-Host "Started at:`t$(Get-CurrentDate-UKFormat)"
     Initialize-RandomDelay -enabled $enableRandomisedStartTime
     
     # Initialize variables
-    $dateUKformat = Get-Date -Format "dd/MM/yy - HH:mm"
     $tempFolder = $env:TEMP
     $zipFilePath = Join-Path $tempFolder "speedtest-win64.zip"
     $extractFolderPath = Join-Path $tempFolder "speedtest-win64"
-
-    # Set up logging
-    $logDirectory = "C:\temp"
-    $baseLogFileName = "speedtest-log"
-    $logFile = Manage-LogFiles -logDirectory $logDirectory -baseLogFileName $baseLogFileName
     
     # Cleanup old versions from previous runs
     Write-Output "Cleaning up any previous files..."
@@ -323,8 +321,8 @@ try {
 
     # Parse the results
     $parsedResult = Parse-Result -result $speedtestResult
-    $parsedResultWithDate = "$dateUKformat | $parsedResult"
-    $verboseResult = Parse-Result-Verbose -result $speedtestResult -dateUKformat $dateUKformat
+    $parsedResultWithDate = "$(Get-CurrentDate-UKFormat) | $parsedResult"
+    $verboseResult = Parse-Result-Verbose -result $speedtestResult -dateUKformat $(Get-CurrentDate-UKFormat)
     Write-Output $verboseResult
 
     # Write parsed (basic) result to Syncro asset custom field
@@ -336,6 +334,8 @@ try {
     Log-Activity -Message "$parsedResultWithDate" -EventName "Internet Speed"
 
     # Write parsed (detailed) result to local log file
+    $baseLogFileName = "speedtest-log"
+    $logFile = Manage-LogFiles -logDirectory $logDirectory -baseLogFileName $baseLogFileName
     Write-Output "Writing result to local log file: $logFile"
     Add-Content -Path $logFile -Value $verboseResult
 

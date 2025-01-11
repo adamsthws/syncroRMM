@@ -152,66 +152,52 @@ function Parse-Result-Verbose {
         [Parameter(Mandatory=$true)]
         [string]$result
     )
-
     # Get current date/time in UK format
     $dateUKformat = Get-Date -Format "dd/MM/yy - HH:mm"
-
     # Initialize output array
     $outputLines = @()
-
-    # Add separator
-    $outputLines += "---------------"
-
-    # Add Speedtest header
-    $outputLines += "Ookla CLI Speedtest: $dateUKformat"
-
+    # Add Speedtest header with padding
+    $outputLines += "CLI Speedtest:`t$dateUKformat"
     # Extract Server info - updated to handle multiple spaces and id
     if ($result -match 'Server:\s*(.*?)\s*\(id:') {
-        $outputLines += "Server: $($matches[1])"
+        $outputLines += "Server:`t`t$($matches[1])"
     } else {
-        $outputLines += "Server: Not Available"
+        $outputLines += "Server:`t`tNot Available"
     }
-
     # Extract ISP - updated to handle multiple spaces
     if ($result -match 'ISP:\s*(.*?)\s*[\r\n]') {
-        $outputLines += "ISP: $($matches[1])"
+        $outputLines += "ISP:`t`t$($matches[1])"
     } else {
-        $outputLines += "ISP: Not Available"
+        $outputLines += "ISP:`t`tNot Available"
     }
-
     # Extract Idle Latency with jitter details
     if ($result -match 'Idle Latency:\s*([\d.]+)\s*ms\s*\(jitter:\s*([\d.]+)ms,\s*low:\s*([\d.]+)ms,\s*high:\s*([\d.]+)ms\)') {
-        $outputLines += "Idle Latency:    $($matches[1]) ms (jitter: $($matches[2])ms, low: $($matches[3])ms, high: $($matches[4])ms)"
+        $outputLines += "Idle Latency:`t$($matches[1]) ms (jitter: $($matches[2])ms, low: $($matches[3])ms, high: $($matches[4])ms)"
     } else {
-        $outputLines += "Idle Latency:    Not Available"
+        $outputLines += "Idle Latency:`tNot Available"
     }
-
     # Extract Download speed and jitter - updated pattern
     if ($result -match 'Download:\s*([\d.]+)\s*([KMG]bps).*?\n.*?([\d.]+)\s*ms\s*\(jitter:\s*([\d.]+)ms,\s*low:\s*([\d.]+)ms,\s*high:\s*([\d.]+)ms\)') {
         $speed = "$($matches[1]) $($matches[2] -replace 'bps','b')"
-        $outputLines += "Download:    $speed (jitter: $($matches[4])ms, low: $($matches[5])ms, high: $($matches[6])ms)"
+        $outputLines += "Download:`t$speed (jitter: $($matches[4])ms, low: $($matches[5])ms, high: $($matches[6])ms)"
     } else {
-        $outputLines += "Download:    Not Available"
+        $outputLines += "Download:`tNot Available"
     }
-
     # Extract Upload speed and jitter - updated pattern
     if ($result -match 'Upload:\s*([\d.]+)\s*([KMG]bps).*?\n.*?([\d.]+)\s*ms\s*\(jitter:\s*([\d.]+)ms,\s*low:\s*([\d.]+)ms,\s*high:\s*([\d.]+)ms\)') {
         $speed = "$($matches[1]) $($matches[2] -replace 'bps','b')"
-        $outputLines += "Upload:    $speed (jitter: $($matches[4])ms, low: $($matches[5])ms, high: $($matches[6])ms)"
+        $outputLines += "Upload:`t`t$speed (jitter: $($matches[4])ms, low: $($matches[5])ms, high: $($matches[6])ms)"
     } else {
-        $outputLines += "Upload:    Not Available"
+        $outputLines += "Upload:`t`tNot Available"
     }
-
     # Extract Packet Loss
     if ($result -match 'Packet Loss:\s*([\d.]+)%') {
-        $outputLines += "Packet Loss:     $($matches[1])%"
+        $outputLines += "Packet Loss:`t$($matches[1])%"
     } else {
-        $outputLines += "Packet Loss:     Not Available"
+        $outputLines += "Packet Loss:`tNot Available"
     }
-
     # Add separator
     $outputLines += "---------------"
-
     # Join all lines with newlines
     return $outputLines -join "`n"
 }

@@ -172,21 +172,21 @@ function Parse-Result-Verbose {
     }
     # Extract Idle Latency with jitter details
     if ($result -match 'Idle Latency:\s*([\d.]+)\s*ms\s*\(jitter:\s*([\d.]+)ms,\s*low:\s*([\d.]+)ms,\s*high:\s*([\d.]+)ms\)') {
-        $outputLines += "Idle Latency:`t$($matches[1]) ms (jitter: $($matches[2])ms, low: $($matches[3])ms, high: $($matches[4])ms)"
+        $outputLines += "Idle Latency:`t$($matches[1]) ms`t(jitter: $($matches[2])ms, low: $($matches[3])ms, high: $($matches[4])ms)"
     } else {
         $outputLines += "Idle Latency:`tNot Available"
     }
     # Extract Download speed and jitter - updated pattern
     if ($result -match 'Download:\s*([\d.]+)\s*([KMG]bps).*?\n.*?([\d.]+)\s*ms\s*\(jitter:\s*([\d.]+)ms,\s*low:\s*([\d.]+)ms,\s*high:\s*([\d.]+)ms\)') {
         $speed = "$($matches[1]) $($matches[2] -replace 'bps','b')"
-        $outputLines += "Download:`t$speed (jitter: $($matches[4])ms, low: $($matches[5])ms, high: $($matches[6])ms)"
+        $outputLines += "Download:`t$speed`t(jitter: $($matches[4])ms, low: $($matches[5])ms, high: $($matches[6])ms)"
     } else {
         $outputLines += "Download:`tNot Available"
     }
     # Extract Upload speed and jitter - updated pattern
     if ($result -match 'Upload:\s*([\d.]+)\s*([KMG]bps).*?\n.*?([\d.]+)\s*ms\s*\(jitter:\s*([\d.]+)ms,\s*low:\s*([\d.]+)ms,\s*high:\s*([\d.]+)ms\)') {
         $speed = "$($matches[1]) $($matches[2] -replace 'bps','b')"
-        $outputLines += "Upload:`t`t$speed (jitter: $($matches[4])ms, low: $($matches[5])ms, high: $($matches[6])ms)"
+        $outputLines += "Upload:`t`t$speed`t(jitter: $($matches[4])ms, low: $($matches[5])ms, high: $($matches[6])ms)"
     } else {
         $outputLines += "Upload:`t`tNot Available"
     }

@@ -5,7 +5,7 @@
     # Cleans up >12-months-old versions of local log file.
     # Logs the result to the asset activity history.
     # Logs the result in an asset custom field. 
-        # Must create custom asset field named: 'Internet Speed'
+        # You must create custom asset field named: 'Internet Speed'
 
 # Randomised start times...
     # Optionally Randomise start period so tests don't run at the same time as each other.

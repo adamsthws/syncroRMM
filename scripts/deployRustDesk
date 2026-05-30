@@ -1,0 +1,338 @@
+#Requires -RunAsAdministrator
+Import-Module $env:SyncroModule -ErrorAction SilentlyContinue
+
+# =============================================================================
+# Deploy-RustDesk.ps1
+# Deploys RustDesk to a client machine, sets a unique permanent password,
+# configures auto-update, and writes connection details to Syncro asset fields.
+# =============================================================================
+
+# --- Helper: Write a timestamped log line ---
+function Write-Log {
+    param([string]$Message, [ValidateSet("INFO","WARN","ERROR")][string]$Level = "INFO")
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    Write-Host "[$timestamp] [$Level] $Message"
+}
+
+# --- Helper: Generate a CVCVC pronounceable word, first letter capitalised ---
+function New-PronouncableWord {
+    $consonants = 'b','c','d','f','g','h','j','k','l','m','n','p','r','s','t','v','w','x','z'
+    $vowels     = 'a','e','i','o','u'
+
+    $word  = ($consonants | Get-Random).ToUpper()
+    $word += ($vowels     | Get-Random)
+    $word += ($consonants | Get-Random)
+    $word += ($vowels     | Get-Random)
+    $word += ($consonants | Get-Random)
+
+    return $word
+}
+
+# --- Helper: Generate full password  e.g. "Batel-Miron-Depus-4" ---
+function New-RustDeskPassword {
+    $w1     = New-PronouncableWord
+    $w2     = New-PronouncableWord
+    $w3     = New-PronouncableWord
+    $digit  = Get-Random -Minimum 0 -Maximum 9
+    return "$w1-$w2-$w3-$digit"
+}
+
+# --- Helper: Get installed RustDesk version from registry (returns $null if not installed) ---
+function Get-InstalledRustDeskVersion {
+    try {
+        $regPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\RustDesk"
+        if (Test-Path $regPath) {
+            return (Get-ItemProperty $regPath -ErrorAction Stop).Version
+        }
+    } catch { }
+    return $null
+}
+
+# --- Helper: Get latest RustDesk release info from GitHub ---
+function Get-LatestRustDeskRelease {
+    $apiUrl   = "https://api.github.com/repos/rustdesk/rustdesk/releases/latest"
+    $headers  = @{ "User-Agent" = "RustDesk-Deploy-Script" }
+    $release  = Invoke-RestMethod -Uri $apiUrl -Headers $headers -ErrorAction Stop
+
+    # Target the 64-bit Windows MSI (preferred for RMM deployment — clean uninstall,
+    # supports shortcut/printer suppression via msiexec properties)
+    $asset = $release.assets | Where-Object {
+        $_.name -match "x86_64\.msi$"
+    } | Select-Object -First 1
+
+    if (-not $asset) {
+        throw "Could not find a Windows x86_64 MSI asset in the latest GitHub release."
+    }
+
+    return @{
+        Version     = $release.tag_name.TrimStart("v")
+        DownloadUrl = $asset.browser_download_url
+        FileName    = $asset.name
+    }
+}
+
+# --- Helper: Wait for a service to reach a desired status ---
+function Wait-ForService {
+    param(
+        [string]$ServiceName,
+        [string]$DesiredStatus = "Running",
+        [int]$TimeoutSeconds   = 60
+    )
+    $elapsed = 0
+    while ($elapsed -lt $TimeoutSeconds) {
+        $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+        if ($svc -and $svc.Status -eq $DesiredStatus) { return $true }
+        Start-Sleep -Seconds 3
+        $elapsed += 3
+    }
+    return $false
+}
+
+# --- Helper: Retrieve the RustDesk ID via --get-id ---
+# --get-id only outputs correctly when run from the RustDesk install directory.
+function Get-RustDeskID {
+    param(
+        [string]$RustDeskExe  = "C:\Program Files\RustDesk\rustdesk.exe",
+        [int]$TimeoutSeconds  = 60
+    )
+
+    $installDir = Split-Path $RustDeskExe -Parent
+    $elapsed    = 0
+
+    while ($elapsed -lt $TimeoutSeconds) {
+        try {
+            # Must run from the install directory for --get-id to output correctly
+            Push-Location $installDir
+            $id = (.\rustdesk.exe --get-id | Out-String).Trim()
+            Pop-Location
+
+            # A valid RustDesk ID is numeric, typically 9-10 digits
+            if ($id -and $id -match '^\d{6,}$') {
+                return $id
+            }
+        } catch {
+            try { Pop-Location } catch { }
+        }
+
+        Start-Sleep -Seconds 3
+        $elapsed += 3
+    }
+
+    return $null
+}
+
+# =============================================================================
+# MAIN
+# =============================================================================
+
+$rustDeskServiceName = "RustDesk"
+$configDir           = "C:\Windows\ServiceProfiles\LocalService\AppData\Roaming\RustDesk\config"
+$configPath          = Join-Path $configDir "RustDesk2.toml"
+$rustDeskExe         = "C:\Program Files\RustDesk\rustdesk.exe"
+$tempDir             = "C:\temp"
+
+Write-Log "=== RustDesk Deployment Starting ==="
+
+# -----------------------------------------------------------------------------
+# STEP 1 — Check installed version vs latest release
+# -----------------------------------------------------------------------------
+Write-Log "Checking latest RustDesk release on GitHub..."
+try {
+    $latest = Get-LatestRustDeskRelease
+    Write-Log "Latest release: $($latest.Version)"
+} catch {
+    Write-Log "Failed to retrieve latest release from GitHub: $_" -Level ERROR
+    exit 1
+}
+
+$installedVersion = Get-InstalledRustDeskVersion
+if ($installedVersion) {
+    Write-Log "RustDesk $installedVersion is currently installed."
+
+    # The registry version may include a build suffix (e.g. "1.4.6.29544831")
+    # while GitHub returns just "1.4.6" -- compare only major.minor.patch
+    $installedShort = ($installedVersion -split '\.')[0..2] -join '.'
+    $latestShort    = ($latest.Version   -split '\.')[0..2] -join '.'
+
+    if ($installedShort -eq $latestShort) {
+        Write-Log "Already up to date ($installedVersion). Skipping installation."
+        $skipInstall = $true
+    } else {
+        Write-Log "Upgrade available ($installedVersion -> $($latest.Version)). Proceeding with install."
+        $skipInstall = $false
+    }
+} else {
+    Write-Log "RustDesk is not installed. Proceeding with fresh install."
+    $skipInstall = $false
+}
+
+# -----------------------------------------------------------------------------
+# STEP 2 — Download and install if needed
+# -----------------------------------------------------------------------------
+if (-not $skipInstall) {
+    try {
+        if (-not (Test-Path $tempDir)) {
+            New-Item -ItemType Directory -Force -Path $tempDir | Out-Null
+        }
+
+        $installerPath = Join-Path $tempDir $latest.FileName
+        Write-Log "Downloading RustDesk $($latest.Version) from $($latest.DownloadUrl)..."
+        Invoke-WebRequest -Uri $latest.DownloadUrl -OutFile $installerPath -UseBasicParsing -ErrorAction Stop
+        Write-Log "Download complete."
+
+        Write-Log "Running silent install..."
+        $msiArgs = "/i `"$installerPath`" /quiet /norestart CREATEDESKTOPSHORTCUTS=N CREATESTARTMENUSHORTCUTS=N INSTALLPRINTER=N"
+        $proc = Start-Process -FilePath "msiexec.exe" -ArgumentList $msiArgs -Wait -PassThru -ErrorAction Stop
+        if ($proc.ExitCode -ne 0) {
+            throw "msiexec exited with code $($proc.ExitCode)."
+        }
+        Write-Log "Installation complete."
+
+    } catch {
+        Write-Log "Installation failed: $_" -Level ERROR
+        exit 1
+    } finally {
+        if (Test-Path $installerPath) {
+            Remove-Item $installerPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    # Brief pause to allow the MSI to finish registering the service before
+    # we start polling -- particularly important during an upgrade over an
+    # existing install where the service is being stopped and restarted.
+    Start-Sleep -Seconds 5
+
+    # Wait for service to appear and start
+    Write-Log "Waiting for RustDesk service to start..."
+    $started = Wait-ForService -ServiceName $rustDeskServiceName -DesiredStatus "Running" -TimeoutSeconds 120
+    if (-not $started) {
+        Write-Log "RustDesk service did not reach Running state within timeout." -Level ERROR
+        exit 1
+    }
+    Write-Log "RustDesk service is running."
+}
+
+# -----------------------------------------------------------------------------
+# STEP 3 — Generate password
+# -----------------------------------------------------------------------------
+Write-Log "Generating unique password..."
+$password = New-RustDeskPassword
+Write-Log "Password generated: $password"
+
+# -----------------------------------------------------------------------------
+# STEP 4 — Ensure service is running, then set password
+# Note: --password communicates with the running service via IPC,
+#       so the service must be running when we call it.
+#
+# Config update (approve-mode, enable-autoupdate) is commented out for now
+# and will be re-enabled once core install/password/ID retrieval is confirmed
+# working. When re-enabled, the correct order is:
+#   1. Stop service
+#   2. Write RustDesk2.toml
+#   3. Start service
+#   4. Set password (service must be running)
+# -----------------------------------------------------------------------------
+
+# Ensure service is running before setting password
+Write-Log "Ensuring RustDesk service is running..."
+try {
+    $svc = Get-Service -Name $rustDeskServiceName -ErrorAction Stop
+    if ($svc.Status -ne "Running") {
+        Start-Service -Name $rustDeskServiceName -ErrorAction Stop
+        $started = Wait-ForService -ServiceName $rustDeskServiceName -DesiredStatus "Running" -TimeoutSeconds 60
+        if (-not $started) {
+            throw "Service did not reach Running state within timeout."
+        }
+    }
+    Write-Log "RustDesk service is running."
+} catch {
+    Write-Log "Failed to ensure RustDesk service is running: $_" -Level ERROR
+    exit 1
+}
+
+Write-Log "Stopping RustDesk service to apply configuration..."
+try {
+    Stop-Service -Name $rustDeskServiceName -Force -ErrorAction Stop
+    $stopped = Wait-ForService -ServiceName $rustDeskServiceName -DesiredStatus "Stopped" -TimeoutSeconds 30
+    if (-not $stopped) { throw "Service did not stop within timeout." }
+    Write-Log "Service stopped."
+} catch {
+    Write-Log "Failed to stop RustDesk service: $_" -Level ERROR
+    exit 1
+}
+
+$tomlContent = @"
+[options]
+approve-mode = "password"
+enable-autoupdate = "Y"
+"@
+
+try {
+    if (-not (Test-Path $configDir)) {
+        New-Item -ItemType Directory -Force -Path $configDir | Out-Null
+    }
+    Set-Content -Path $configPath -Value $tomlContent -Encoding UTF8 -Force -ErrorAction Stop
+    Write-Log "Configuration written to $configPath"
+} catch {
+    Write-Log "Failed to write RustDesk config: $_" -Level ERROR
+    Start-Service -Name $rustDeskServiceName -ErrorAction SilentlyContinue
+    exit 1
+}
+
+Write-Log "Starting RustDesk service after config update..."
+try {
+    Start-Service -Name $rustDeskServiceName -ErrorAction Stop
+    $started = Wait-ForService -ServiceName $rustDeskServiceName -DesiredStatus "Running" -TimeoutSeconds 60
+    if (-not $started) { throw "Service did not reach Running state within timeout." }
+    Write-Log "RustDesk service is running."
+} catch {
+    Write-Log "Failed to start RustDesk service: $_" -Level ERROR
+    exit 1
+}
+
+
+# Set the permanent password — service must be running for this to work
+try {
+    Write-Log "Setting permanent password..."
+    $installDir = Split-Path $rustDeskExe -Parent
+    $proc = Start-Process -FilePath $rustDeskExe -ArgumentList "--password `"$password`"" -WorkingDirectory $installDir -Wait -PassThru -ErrorAction Stop
+    if ($proc.ExitCode -ne 0) {
+        throw "rustdesk.exe --password exited with code $($proc.ExitCode)."
+    }
+    Write-Log "Password set successfully."
+} catch {
+    Write-Log "Failed to set RustDesk password: $_" -Level ERROR
+    exit 1
+}
+
+# -----------------------------------------------------------------------------
+# STEP 5 — Retrieve RustDesk ID (retry loop — service needs to register)
+# -----------------------------------------------------------------------------
+Write-Log "Waiting for RustDesk to register and obtain an ID..."
+$rustDeskID = Get-RustDeskID -RustDeskExe $rustDeskExe -TimeoutSeconds 60
+
+if (-not $rustDeskID) {
+    Write-Log "Could not retrieve RustDesk ID within timeout. The ID may not have been assigned yet." -Level WARN
+    Write-Log "Syncro asset fields will not be updated. Re-run the script once the machine has internet connectivity." -Level WARN
+    exit 1
+}
+
+Write-Log "RustDesk ID: $rustDeskID"
+
+# -----------------------------------------------------------------------------
+# STEP 6 — Write connection details to Syncro asset fields
+# -----------------------------------------------------------------------------
+Write-Log "Writing connection details to Syncro asset fields..."
+try {
+    Set-Asset-Field -Name "RustDesk ID" -Value $rustDeskID -ErrorAction Stop
+    Set-Asset-Field -Name "RustDesk Password" -Value $password -ErrorAction Stop
+    Write-Log "Syncro asset fields updated successfully."
+} catch {
+    Write-Log "Failed to update Syncro asset fields: $_" -Level WARN
+    # Non-critical — log the values so they can be recorded manually
+    Write-Log "RustDesk ID: $rustDeskID" -Level WARN
+    Write-Log "RustDesk Password: $password" -Level WARN
+}
+
+Write-Log "=== RustDesk Deployment Complete ==="
+Write-Log "ID: $rustDeskID  |  Password: $password"

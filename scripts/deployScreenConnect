@@ -1,0 +1,79 @@
+# This is an amalgamation of Steven Grabowski's & Sam James' scripts. Thanks Steven & Sam!
+
+# This will deploy Screenconnect to your Syncro asset also enabling syncro integration.
+#   It will set the asset friendly name and company name from syncro in your screenconnect portal. (currently, the official syncro integration dosn't do this)
+#   It will integrate screenconnect with syncro to allow starting a remote session from the Syncro asset page. (Just like the official integration)
+
+# When creating this in syncro, create two Syncro platform variables...
+#   Variable Name - $FriendlyName / Variable Type - platform / Value - asset_custom_field_device_name
+#   Variable Name - $CompanyName / Variable Type - platform / Value - customer_business_name_or_customer_full_name
+
+Import-Module $env:SyncroModule
+
+# Replace this with YOUR screenconnect client service name (find it in programs & features)
+$serviceName = 'ScreenConnect Client (17d302120dfb89e5)'
+
+# URL for ScreenConnect msi download
+# Edit your screenconnect MSI installer URL to include variables: $FriendlyName & $CompanyName (near the end) (this is to set the company name & asset friendly name from syncro in the screenconnect portal)
+$url = "https://ut.screenconnect.com/Bin/ConnectWiseControl.ClientSetup.msi?h=instance-t41ilb-relay.screenconnect.com&p=443&k=BgIAAACkAABSU0ExAAgAAAEAAQAFxyP5x6L6kQVP%2FhzU3TPGEBG%2FwMk5jFNCs1HkM%2BAo8TG0FqNs3D87XnaohR1d9vgDGTOIb6BNTQXhQZVneTL2y54C%2BzMvhTpmGXfNTO%2B29BB%2BZ3bEhCDHJs3VZUNwldYNWx2w3k1VEECDahZ9pSLIjZyWu%2FIBYm1aUig6zirtaKjdDUehEBxKAOLZayJnMLVB43Eg7Gjpm%2BhGyYz4B0%2BOvOdrz5kpep6%2BX3exO1jhSHyhl2oXNht1p9zgM%2FljCE5UthNp3IzamWsjqb0578QFTjistht4D%2BXeKW7Ey1p%2BUPcVW5SIlMJvBLLA5cqoJKRKmKgs54Y3pFq0YwdNFyHQ&e=Access&y=Guest&t=$FriendlyName&c=$CompanyName&c=&c=&c=&c=&c=&c=&c="
+
+# URL for your screenconnect instance, you can customize the port or leave it off
+$scdomain = "ut.screenconnect.com"
+
+# Your email (for the ticket submission)
+$yourEmail = "adam@unboundedtechnology.com"
+
+If (Get-Service $serviceName -ErrorAction SilentlyContinue) {
+   If ((Get-Service $serviceName).Status -eq 'Running') {
+       # do nothing
+   } Else {
+       #$ticket = Create-Syncro-Ticket -Subject "ScreenConnect needs started on $env:computername" -IssueType "Automated" -Status "New"
+       Write-Host "$serviceName found, but it is not running for some reason."
+       write-host "starting $servicename"
+       start-service $serviceName
+       #$startAt = (Get-Date).AddMinutes(-30).toString("o")
+       #Create-Syncro-Ticket-TimerEntry -TicketIdOrNumber $ticket.ticket.id -StartTime $startAt -DurationMinutes 5 -Notes "Automated system cleaned up the disk space." -UserIdOrEmail $yourEmail
+
+   }
+} Else {
+   #$ticket = Create-Syncro-Ticket -Subject "ScreenConnect needs installed on $env:computername" -IssueType "Automated" -Status "New"
+       
+   Write-Host "$serviceName not found - need to install"
+   (new-object System.Net.WebClient).DownloadFile($url,'C:\windows\temp\sc.msi')
+   Start-Process msiexec.exe -Wait -ArgumentList '/I c:\windows\temp\sc.msi /q'
+   #$startAt = (Get-Date).AddMinutes(-30).toString("o")
+   #Create-Syncro-Ticket-TimerEntry -TicketIdOrNumber $ticket.ticket.id -StartTime $startAt -DurationMinutes 5 -Notes "Install ScreenConnect." -UserIdOrEmail $yourEmail
+
+}
+
+#Get the Screenconnect URL and write to Syncro asset.
+$Keys = Get-ChildItem HKLM:\System\ControlSet001\Services
+$Guid = "Null";
+$Items = $Keys | Foreach-Object {Get-ItemProperty $_.PsPath }
+
+    ForEach ($Item in $Items)
+    {
+        if ($item.PSChildName -like "*ScreenConnect Client*")
+    {
+    $SubKeyName = $Item.PSChildName
+    $Guid = (Get-ItemProperty "HKLM:\SYSTEM\ControlSet001\Services\$SubKeyName").ImagePath
+    }
+}
+
+$GuidParser1 = $Guid -split "&s="
+$GuidParser2 = $GuidParser1[1] -split "&k="
+$Guid = $GuidParser2[0]
+$ScreenConnectUrl = "https://$scdomain/Host#Access/All%20Machines//$Guid/Join"
+
+Write-Host ScreenConnect URL Is: $ScreenConnectUrl
+
+Set-Asset-Field -Name "Screenconnect" -Value $ScreenConnectUrl
+
+#Get the Screenconnect GUID and write to Syncro asset.
+$val = (Get-ItemProperty -path "HKLM:\SYSTEM\CurrentControlSet\Services\$serviceName").ImagePath
+$Regex = [Regex]::new("(?<=s=)(.*?)(?=&)")
+$Match = $Regex.Match($val)
+if($Match.Success)
+{
+Set-Asset-Field -Name "ScreenConnect GUID" -Value $Match
+}

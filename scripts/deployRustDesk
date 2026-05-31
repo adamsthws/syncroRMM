@@ -8,6 +8,9 @@ Import-Module $env:SyncroModule
 #  - Writes connection details (ID & PW) to Syncro asset fields.
 #
 #    Compatability: Windows-x64 only
+#    To-do: Add connection string to Sycnro for one-click connection
+#           URL structure: rustdesk://connection/new/<rustdesk-ID>?password=<rustdesk-pw>
+#           *Hijack the "ScreenConnect" asset field to store the connection URL?
 # =============================================================================
 
 
@@ -307,9 +310,10 @@ if (-not $rustDeskID) {
 try {
     Set-Asset-Field -Name "RustDesk ID" -Value $rustDeskID -ErrorAction Stop
     Set-Asset-Field -Name "RustDesk Password" -Value $password -ErrorAction Stop
-    # Writing to the "Screenconnect" field activates Syncro's built-in remote-session
-    # button and activity logging — same mechanism used by the native SC integration.
-    Set-Asset-Field -Name "ScreenConnect GUID" -Value "rustdesk://connect/$rustDeskID" -ErrorAction Stop
+    ### To-Do ###
+    # Writing to the "ScreenConnect GUID" field activates Syncro's built-in remote-session
+    # button and activity logging — the mechanism used by the native SC integration.
+    #Set-Asset-Field -Name "ScreenConnect GUID" -Value "rustdesk://connect/$rustDeskID" -ErrorAction Stop
     Write-Log "Rustdesk deploy/update finished successfully."
 } catch {
     Write-Log "Failed to update Syncro asset fields: $_" -Level WARN

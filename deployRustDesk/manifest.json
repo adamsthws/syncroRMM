@@ -1,0 +1,14 @@
+{
+  "manifest_version": 2,
+  "name": "RustDesk URL Rewriter",
+  "version": "1.1",
+  "description": "Rewrites ScreenConnect URLs to native RustDesk protocol",
+  "permissions": [
+    "webRequest",
+    "webRequestBlocking",
+    "*://*.screenconnect.com/*"
+  ],
+  "background": {
+    "scripts": ["background.js"]
+  }
+}

@@ -1,0 +1,104 @@
+#Requires -RunAsAdministrator
+
+# Creates a local administrative account on PC and attempts to hide it from the logon screen.
+# You must have created an Asset Custom Field called "LocalAdmin Password" in Syncro to store the password generated.
+# Running this script regularly will ensure secure local admin passwords and regular password rotations.
+
+
+Import-Module $env:SyncroModule
+
+$Username = "LocalAdmin"
+$group    = "Administrators"
+$KeyPath  = "HKLM:\Software\Microsoft\Windows NT\CurrentVersion\Winlogon"
+
+# --- Helper: Generate a CVCVC pronounceable word, first letter capitalised ---
+function New-PronouncableWord {
+    $consonants = 'b','c','d','f','g','h','j','k','l','m','n','p','r','s','t','v','w','x','z'
+    $vowels     = 'a','e','i','o','u'
+
+    $word  = ($consonants | Get-Random).ToUpper()
+    $word += ($vowels     | Get-Random)
+    $word += ($consonants | Get-Random)
+    $word += ($vowels     | Get-Random)
+    $word += ($consonants | Get-Random)
+
+    return $word
+}
+
+# --- Helper: Generate full password  e.g. "Batel-Miron-Depus" ---
+function New-Password {
+    $w1 = New-PronouncableWord
+    $w2 = New-PronouncableWord
+    $w3 = New-PronouncableWord
+    return "$w1-$w2-$w3"
+}
+
+try {
+    $Password       = New-Password
+    $SecurePassword = ConvertTo-SecureString $Password -AsPlainText -Force
+} catch {
+    Write-Error "Failed to generate password: $_"
+    exit 1
+}
+
+try {
+    $existing = Get-LocalUser -Name $Username -ErrorAction SilentlyContinue
+} catch {
+    Write-Error "Failed to query local users: $_"
+    exit 1
+}
+
+if ($null -eq $existing) {
+    try {
+        New-LocalUser -Name $Username -Password $SecurePassword -PasswordNeverExpires $true -AccountNeverExpires | Out-Null
+    } catch {
+        Write-Error "Failed to create local user '${Username}': $_"
+        exit 1
+    }
+
+    try {
+        Add-LocalGroupMember -Group $group -Member $Username
+    } catch {
+        Write-Error "Failed to add '${Username}' to '${group}': $_"
+        exit 1
+    }
+} else {
+    try {
+        Set-LocalUser -Name $Username -Password $SecurePassword
+    } catch {
+        Write-Error "Failed to set password for '${Username}': $_"
+        exit 1
+    }
+}
+
+try {
+    Set-LocalUser -Name $Username -PasswordNeverExpires $true
+} catch {
+    Write-Error "Failed to set PasswordNeverExpires for '${Username}': $_"
+    exit 1
+}
+
+try {
+    Set-Asset-Field -Name "LocalAdmin Password" -Value $Password
+} catch {
+    Write-Error "Failed to save password to Syncro asset field: $_"
+    exit 1
+}
+
+# Hide account from the Windows logon screen
+try {
+    $saPath   = "$KeyPath\SpecialAccounts"
+    $listPath = "$saPath\UserList"
+    if (-not (Test-Path $saPath))   { New-Item -Path $KeyPath  -Name SpecialAccounts | Out-Null }
+    if (-not (Test-Path $listPath)) { New-Item -Path $saPath   -Name UserList        | Out-Null }
+    New-ItemProperty -Path $listPath -Name $Username -Value 0 -PropertyType DWord -Force | Out-Null
+} catch {
+    Write-Error "Failed to hide '${Username}' from logon screen: $_"
+    exit 1
+}
+
+try {
+    Log-Activity -Message "LocalAdmin Password Rotation Completed" -EventName "Password Rotation"
+} catch {
+    Write-Error "Failed to log activity: $_"
+}

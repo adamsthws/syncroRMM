@@ -1,0 +1,27 @@
+#Requires -RunAsAdministrator
+
+# Show all user accounts on the Windows login screen.
+# (where usually it only shows the last logged in user).
+# Applies to local users, AD domain-joined and Entra ID cloud identities.
+
+Import-Module $env:SyncroModule
+
+$regPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System"
+$regName = "EnumerateLocalUsers"
+
+try {
+    if (-not (Test-Path $regPath)) {
+        New-Item -Path $regPath -Force | Out-Null
+    }
+
+    New-ItemProperty -Path $regPath -Name $regName -PropertyType DWord -Value 1 -Force | Out-Null
+} catch {
+    Write-Error "Failed to set ${regName} registry value: $_"
+    exit 1
+}
+
+try {
+    Log-Activity -Message "EnumerateLocalUsers enabled: all local users will now appear on the login screen." -EventName "Show All Users Enabled"
+} catch {
+    Write-Error "Failed to log activity: $_"
+}

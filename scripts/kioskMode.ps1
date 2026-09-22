@@ -5,9 +5,9 @@
     restricted, non-InPrivate Microsoft Edge locked to Microsoft 365 domains,
     both pinned to Start and the taskbar.
     Also disables Task Manager and "Change a password" on the Ctrl+Alt+Del
-    screen for the kiosk account only, via that user's own registry hive —
+    screen for the kiosk account only, via that user's own registry hive -
     no other account on the machine is affected.
-    Fully self-contained — writes the Assigned Access XML it needs to
+    Fully self-contained - writes the Assigned Access XML it needs to
     C:\ProgramData\Kiosk\, plus the Edge shortcut Start/taskbar pinning
     requires into the All Users Start Menu, at runtime.
     Reversing (-Enabled false) deletes those files, clears the Assigned Access
@@ -21,7 +21,7 @@
     (plausible domain count, valid-looking hostnames, a handful of
     known-required domains present) before applying it. If the fetch or the
     sanity check fails, the currently-applied allowlist (or, on a first run,
-    the built-in $DefaultAllowedDomains fallback below) is left untouched —
+    the built-in $DefaultAllowedDomains fallback below) is left untouched -
     the list is never wiped just because Microsoft's endpoint isn't
     reachable.
 
@@ -36,7 +36,7 @@
       all (either standalone or from Syncro with no variables set) enables
       kiosk mode for whichever user is currently logged on:
         -Enabled    defaults to "true"
-        -KioskUser  defaults to "CurrentUser" — whichever user is currently
+        -KioskUser  defaults to "CurrentUser" - whichever user is currently
                     logged on interactively (resolved at runtime). Other
                     accepted values:
                       "AzureAD\user@tenant.com"  - an Azure AD account (a UPN)
@@ -50,14 +50,14 @@
 # ===========================================================================
 # Re-launch under 64-bit PowerShell if we're running as a 32-bit process on a
 # 64-bit OS. HKLM:\SOFTWARE\Policies\... (everything this script writes to,
-# including the Edge policy keys) is subject to WOW64 registry redirection —
+# including the Edge policy keys) is subject to WOW64 registry redirection -
 # a 32-bit process writing there is silently redirected to
 # HKLM:\SOFTWARE\WOW6432Node\..., which 64-bit Edge never reads. 
 # Some RMM agents run scripts under a 32-bit
 # PowerShell host even on 64-bit Windows, so this can't be assumed away.
 # ===========================================================================
 if ([Environment]::Is64BitOperatingSystem -and -not [Environment]::Is64BitProcess) {
-    Write-Warning "Running as a 32-bit process on a 64-bit OS — re-launching under 64-bit PowerShell so registry writes land in the real (non-WOW6432Node) hive."
+    Write-Warning "Running as a 32-bit process on a 64-bit OS - re-launching under 64-bit PowerShell so registry writes land in the real (non-WOW6432Node) hive."
     $sysnativePwsh = Join-Path $env:WINDIR "Sysnative\WindowsPowerShell\v1.0\powershell.exe"
     $relaunchArgs = @($args)
     if (-not ($relaunchArgs -contains '-Enabled')) {
@@ -77,7 +77,7 @@ if ([Environment]::Is64BitOperatingSystem -and -not [Environment]::Is64BitProces
     $scriptPath = $PSCommandPath
     if ([string]::IsNullOrWhiteSpace($scriptPath)) { $scriptPath = $MyInvocation.MyCommand.Path }
     if ([string]::IsNullOrWhiteSpace($scriptPath) -or -not (Test-Path $sysnativePwsh)) {
-        Write-Error "Could not re-launch under 64-bit PowerShell (script path or Sysnative host unavailable) — aborting rather than risk writing policy to the wrong registry view."
+        Write-Error "Could not re-launch under 64-bit PowerShell (script path or Sysnative host unavailable) - aborting rather than risk writing policy to the wrong registry view."
         exit 1
     }
     $relaunchArgList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $scriptPath) + $relaunchArgs
@@ -104,18 +104,18 @@ for ($i = 0; $i -lt $args.Count; $i++) {
 $ErrorActionPreference = "Stop"
 
 # ===========================================================================
-# CONFIGURATION — edit before first use
+# CONFIGURATION - edit before first use
 # ===========================================================================
 $OneAuthAUMID   = "ZohoCorp.44386D730E544_hfrrf6a1akhx2!App"   # Zoho OneAuth
 $HomepageUrl    = "https://m365.cloud.microsoft/apps"
-# Fallback only — used when the live fetch from Microsoft's endpoint list
+# Fallback only - used when the live fetch from Microsoft's endpoint list
 # (see Get-M365AllowedDomains below) fails or fails its sanity check AND
 # there is no already-applied allowlist on the machine to fall back to
 # instead (i.e. this is a first run with no network access). Otherwise
 # this list is not used; keep it reasonably fresh but don't rely on it.
 # Sourced from Microsoft's official Worldwide M365 endpoint list
 # (https://endpoints.office.com/endpoints/worldwide), filtered to HTTPS (443)
-# entries — i.e. every domain a browser may need to reach to use M365 web
+# entries - i.e. every domain a browser may need to reach to use M365 web
 # apps (Office, Outlook, SharePoint/OneDrive, Teams, sign-in, and the CDN/
 # cert-validation domains those pages depend on).
 $DefaultAllowedDomains = @(
@@ -216,13 +216,13 @@ $StateFile = Join-Path $WorkDir "kiosk-state.json"
 # The multi-app kiosk AllowedApps schema has no attribute for passing launch
 # arguments to a desktop app (confirmed via Microsoft-Windows-AssignedAccess/
 # Admin: both "rs5:Arguments" and unprefixed "DesktopAppArguments" are
-# rejected as undefined) — the only way to launch Edge at a specific
+# rejected as undefined) - the only way to launch Edge at a specific
 # homepage/with specific flags is to point DesktopAppPath at a prebuilt
 # shortcut that already has those arguments baked in, rather than at
 # msedge.exe directly.
 # StartPins' desktopAppLink (and TaskbarLayout's DesktopApplicationLinkPath)
 # only resolve a shortcut that actually lives under a Start Menu "Programs"
-# folder — per Microsoft's own examples they're always
+# folder - per Microsoft's own examples they're always
 # %APPDATA%\...\Start Menu\Programs\... or %ALLUSERSPROFILE%\...\Start
 # Menu\Programs\...  A shortcut anywhere else (e.g. our own WorkDir) is
 # silently ignored, which is why Edge previously had no Start tile.
@@ -277,7 +277,7 @@ if ($build -lt $MinBuild) {
     Write-Error "This script targets Windows 11 25H2 (build $MinBuild) or later. Detected build $build."
     exit 1
 }
-# Multi-app Assigned Access is not supported on Windows Home — EditionID is
+# Multi-app Assigned Access is not supported on Windows Home - EditionID is
 # "Core"/"CoreN" there (vs. "Professional", "Enterprise", "Education", etc.),
 # and attempting it anyway fails deep inside Enable-Kiosk with an opaque MDM
 # error, so fail fast here with a clear reason instead.
@@ -288,7 +288,7 @@ try {
     exit 1
 }
 if ($editionId -match '^Core') {
-    Write-Error "Windows $editionId (Home) does not support multi-app Assigned Access kiosk mode — Pro, Enterprise, or Education is required."
+    Write-Error "Windows $editionId (Home) does not support multi-app Assigned Access kiosk mode - Pro, Enterprise, or Education is required."
     exit 1
 }
 
@@ -310,7 +310,7 @@ if ($EnableKiosk) {
     if ($KioskUser.Trim().ToLower() -eq "currentuser") {
         $currentUser = (Get-CimInstance -ClassName Win32_ComputerSystem).UserName
         if ([string]::IsNullOrWhiteSpace($currentUser)) {
-            Write-Error "No user is currently logged on interactively — sign in first, or pass -KioskUser explicitly (e.g. 'AzureAD\user@tenant.com')."
+            Write-Error "No user is currently logged on interactively - sign in first, or pass -KioskUser explicitly (e.g. 'AzureAD\user@tenant.com')."
             exit 1
         }
         $KioskUser = $currentUser
@@ -323,7 +323,7 @@ if ($EnableKiosk) {
 # ===========================================================================
 function Confirm-RegistryValue {
     # Re-reads a value immediately after it's written and logs whether it
-    # actually stuck. This is diagnostic only — it catches something else on
+    # actually stuck. This is diagnostic only - it catches something else on
     # the machine reverting/deleting policy values the instant we write them
     # (seen in the field: everything but the last-written value was gone by
     # the time edge://policy was checked), which a normal try/catch around
@@ -335,14 +335,15 @@ function Confirm-RegistryValue {
         return $true
     } else {
         $gotStr = if ($actual) { "$($actual.$Name)" } else { "<missing>" }
-        Write-Warning "  [VERIFY FAILED] $Path\$Name — expected '$ExpectedValue', found '$gotStr' immediately after writing it"
+        Write-Warning "  [VERIFY FAILED] $Path\$Name - expected '$ExpectedValue', found '$gotStr' immediately after writing it"
         return $false
     }
 }
 
 function Set-TrackedValue {
     param($Path, $Name, $Value, $Type, [ref]$Changes)
-    New-Item -Path $Path -Force | Out-Null
+    # New-Item -Force on an existing registry key recreates it empty, wiping all values and subkeys.
+    if (-not (Test-Path $Path)) { New-Item -Path $Path -Force | Out-Null }
     $existing = Get-ItemProperty -Path $Path -Name $Name -ErrorAction SilentlyContinue
     $Changes.Value += [PSCustomObject]@{
         Path     = $Path
@@ -357,7 +358,7 @@ function Set-TrackedValue {
 
 function Get-M365AllowedDomains {
     # Fetches Microsoft's official Worldwide M365 endpoint list and returns
-    # every domain served over HTTPS (443) — i.e. the set relevant to a
+    # every domain served over HTTPS (443) - i.e. the set relevant to a
     # browser allowlist. Returns $null (never a partial/empty list) on any
     # failure so the caller can fall back cleanly.
     try {
@@ -399,6 +400,25 @@ function Test-M365AllowedDomains {
     return $true
 }
 
+function ConvertTo-EdgeUrlPatterns {
+    # Edge's URL filter format only allows '*' as the entire host, so
+    # "*.office.com" matches nothing. A bare host already covers all of its
+    # subdomains, so reduce each wildcard to the nearest whole parent domain.
+    param([string[]]$Domains)
+    @(
+        $Domains | ForEach-Object {
+            $d = $_
+            $star = $d.LastIndexOf('*')
+            if ($star -ge 0) {
+                $d = $d.Substring($star + 1)
+                if (-not $d.StartsWith('.')) { $d = $d.Substring([Math]::Max($d.IndexOf('.'), 0)) }
+                $d = $d.TrimStart('.')
+            }
+            if ($d) { $d.ToLowerInvariant() }
+        } | Sort-Object -Unique
+    )
+}
+
 function Get-CurrentAllowlistDomains {
     # Reads back whatever domains are already applied in the Edge
     # URLAllowlist registry key, in their existing numeric order.
@@ -425,7 +445,7 @@ function Resolve-KioskUserSid {
         } catch { }
     }
 
-    # Fall back to matching against local profile folders — handles Azure AD
+    # Fall back to matching against local profile folders - handles Azure AD
     # accounts (and anything NTAccount couldn't resolve directly), since a
     # signed-in AAD user's profile folder is named after their UPN's local part.
     $shortName = ($KioskUser -split '\\')[-1]
@@ -445,7 +465,7 @@ function Enable-Kiosk {
 
     # Populated as changes are made below. Saved in the `finally` block so
     # that a failure partway through still leaves an accurate state file
-    # behind — otherwise a crash here would apply some registry/hive changes
+    # behind - otherwise a crash here would apply some registry/hive changes
     # but leave nothing to revert them, since the state file used to only be
     # written after everything succeeded.
     $changes = @()
@@ -480,7 +500,7 @@ function Enable-Kiosk {
     try {
         $aaObj = Get-CimInstance -Namespace $namespaceName -ClassName $className
     } catch {
-        throw "Could not access the Assigned Access (MDM_AssignedAccess) WMI class — this Windows edition/SKU likely doesn't support multi-app kiosk mode. $($_.Exception.Message)"
+        throw "Could not access the Assigned Access (MDM_AssignedAccess) WMI class - this Windows edition/SKU likely doesn't support multi-app kiosk mode. $($_.Exception.Message)"
     }
     $previousAssignedAccessConfig = $aaObj.Configuration
 
@@ -495,21 +515,21 @@ function Enable-Kiosk {
         $isAdmin = [bool](Get-LocalGroupMember -Group "Administrators" -ErrorAction SilentlyContinue |
             Where-Object { $_.SID.Value -eq $kioskSid })
         if ($isAdmin) {
-            Write-Host "'$KioskUser' is a local administrator — Assigned Access requires a standard account, so removing it from Administrators."
+            Write-Host "'$KioskUser' is a local administrator - Assigned Access requires a standard account, so removing it from Administrators."
             Remove-LocalGroupMember -Group "Administrators" -Member $kioskSid
             $demotedFromAdmin = [PSCustomObject]@{ Sid = $kioskSid; WasAdmin = $true }
         }
     } else {
-        Write-Warning "Could not resolve a SID for '$KioskUser' — cannot verify it isn't a local administrator (Assigned Access will fail with an opaque error if it is)."
+        Write-Warning "Could not resolve a SID for '$KioskUser' - cannot verify it isn't a local administrator (Assigned Access will fail with an opaque error if it is)."
     }
 
     # --- Build a dedicated Edge shortcut with the homepage/flags baked in
-    # (see the note above $EdgeShortcutPath — the CSP has no attribute for
+    # (see the note above $EdgeShortcutPath - the CSP has no attribute for
     # this, so a shortcut is the only way to pass launch arguments). This is
     # only usable as the StartPins tile target, not as the AllowedApps entry
-    # itself — AllowedApps must declare the real msedge.exe path (pointing it
+    # itself - AllowedApps must declare the real msedge.exe path (pointing it
     # at the .lnk instead fails later, at "Profile element validation", once
-    # the XML is schema-valid but semantically wrong) — Windows resolves a
+    # the XML is schema-valid but semantically wrong) - Windows resolves a
     # pinned shortcut's target back to an AllowedApps entry to validate it. ---
     $edgeExePath = "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
     New-Item -Path $StartMenuProgramsDir -ItemType Directory -Force | Out-Null
@@ -585,11 +605,11 @@ function Enable-Kiosk {
     Set-CimInstance -CimInstance $aaObj
 
     # --- Edge policy (registry), tracking every value touched ---
-    New-Item -Path "$EdgePolicyPath\URLBlocklist" -Force | Out-Null
     $urlBlocklistExisted = (Get-Item "$EdgePolicyPath\URLBlocklist" -ErrorAction SilentlyContinue).Property.Count -gt 0
+    if (-not (Test-Path "$EdgePolicyPath\URLBlocklist")) { New-Item -Path "$EdgePolicyPath\URLBlocklist" -Force | Out-Null }
     New-ItemProperty -Path "$EdgePolicyPath\URLBlocklist" -Name "1" -Value "*" -PropertyType String -Force | Out-Null
     Confirm-RegistryValue -Path "$EdgePolicyPath\URLBlocklist" -Name "1" -ExpectedValue "*" | Out-Null
-    # URLBlocklist's "*" only covers web content — internal edge:// pages
+    # URLBlocklist's "*" only covers web content - internal edge:// pages
     # aren't reliably caught by it (confirmed by testing: edge://settings
     # stayed reachable), and there's no dedicated "hide Settings" policy, so
     # Microsoft's own guidance is to blocklist these edge:// URLs explicitly.
@@ -614,12 +634,13 @@ function Enable-Kiosk {
         Write-Host "Refreshed Microsoft 365 domain allowlist from Microsoft ($($fetchedDomains.Count) domains)."
         $domainsToApply = $fetchedDomains
     } elseif ($existingDomains.Count -gt 0) {
-        Write-Warning "Could not refresh the Microsoft 365 domain list (fetch failed or failed sanity check) — keeping the $($existingDomains.Count) domains already applied on this machine."
+        Write-Warning "Could not refresh the Microsoft 365 domain list (fetch failed or failed sanity check) - keeping the $($existingDomains.Count) domains already applied on this machine."
         $domainsToApply = $existingDomains
     } else {
-        Write-Warning "Could not refresh the Microsoft 365 domain list — using the built-in fallback list ($($DefaultAllowedDomains.Count) domains)."
+        Write-Warning "Could not refresh the Microsoft 365 domain list - using the built-in fallback list ($($DefaultAllowedDomains.Count) domains)."
         $domainsToApply = $DefaultAllowedDomains
     }
+    $domainsToApply = ConvertTo-EdgeUrlPatterns -Domains $domainsToApply
 
     $urlAllowlistExisted = Test-Path "$EdgePolicyPath\URLAllowlist"
     if ($urlAllowlistExisted) {
@@ -636,16 +657,16 @@ function Enable-Kiosk {
     }
     $appliedAllowlistCount = (Get-Item "$EdgePolicyPath\URLAllowlist" -ErrorAction SilentlyContinue).Property.Count
     if ($appliedAllowlistCount -eq $domainsToApply.Count) {
-        Write-Host "  [OK] $EdgePolicyPath\URLAllowlist — $appliedAllowlistCount domains verified present immediately after write"
+        Write-Host "  [OK] $EdgePolicyPath\URLAllowlist - $appliedAllowlistCount domains verified present immediately after write"
     } else {
-        Write-Warning "  [VERIFY FAILED] $EdgePolicyPath\URLAllowlist — expected $($domainsToApply.Count) domains, found $appliedAllowlistCount immediately after write"
+        Write-Warning "  [VERIFY FAILED] $EdgePolicyPath\URLAllowlist - expected $($domainsToApply.Count) domains, found $appliedAllowlistCount immediately after write"
     }
 
     Set-TrackedValue -Path $EdgePolicyPath -Name "RestoreOnStartup" -Value 4 -Type DWord -Changes ([ref]$changes)
     $restoreUrlsExisted = Test-Path "$EdgePolicyPath\RestoreOnStartupURLs"
     if ($restoreUrlsExisted) {
         # Clear any pre-existing entries first (e.g. leftover "2", "3", ...
-        # from a prior run with a different/longer URL list) — otherwise
+        # from a prior run with a different/longer URL list) - otherwise
         # they'd survive alongside our "1" below and Edge would restore
         # those extra tabs too instead of opening only the homepage.
         Get-Item "$EdgePolicyPath\RestoreOnStartupURLs" | Select-Object -ExpandProperty Property | ForEach-Object {
@@ -659,18 +680,18 @@ function Enable-Kiosk {
 
     Set-TrackedValue -Path $EdgePolicyPath -Name "HomepageLocation" -Value $HomepageUrl -Type String -Changes ([ref]$changes)
     Set-TrackedValue -Path $EdgePolicyPath -Name "HomepageIsNewTabPage" -Value 0 -Type DWord -Changes ([ref]$changes)
-    # HomepageLocation only covers the Home button/startup page — new tabs
+    # HomepageLocation only covers the Home button/startup page - new tabs
     # (Ctrl+T, new windows) are a separate policy surface and would otherwise
     # open Edge's default New Tab page instead of the M365 start page.
     Set-TrackedValue -Path $EdgePolicyPath -Name "NewTabPageLocation" -Value $HomepageUrl -Type String -Changes ([ref]$changes)
     Set-TrackedValue -Path $EdgePolicyPath -Name "NewTabPageOverrideEnabled" -Value 1 -Type DWord -Changes ([ref]$changes)
-    # Shows the Home button on the toolbar, pointed at HomepageLocation —
+    # Shows the Home button on the toolbar, pointed at HomepageLocation -
     # off by default in Edge, and the kiosk has no other easy way back to
     # the M365 start page from deep inside a site.
     Set-TrackedValue -Path $EdgePolicyPath -Name "ShowHomeButton" -Value 1 -Type DWord -Changes ([ref]$changes)
     # Microsoft's own guidance: on a brand-new Edge profile (exactly the
     # kiosk account's first sign-in), HomepageLocation/RestoreOnStartup(URLs)
-    # are documented to be skipped on the very first launch — Edge shows its
+    # are documented to be skipped on the very first launch - Edge shows its
     # first-run welcome/splash experience instead and only starts honoring
     # these policies from the second launch onward. HideFirstRunExperience
     # suppresses that splash screen so RestoreOnStartup/HomepageLocation take
@@ -688,7 +709,7 @@ function Enable-Kiosk {
     Set-TrackedValue -Path $EdgePolicyPath -Name "EditFavoritesEnabled" -Value 0 -Type DWord -Changes ([ref]$changes)
     Set-TrackedValue -Path $EdgePolicyPath -Name "BrowserSignin" -Value 2 -Type DWord -Changes ([ref]$changes)
     # "Automatically sign in to sites with your current work or school
-    # account" (Settings > Profiles > Profile preferences) — lets M365 web
+    # account" (Settings > Profiles > Profile preferences) - lets M365 web
     # apps SSO the kiosk account in via the device's AAD credentials instead
     # of prompting for a password on every site.
     Set-TrackedValue -Path $EdgePolicyPath -Name "AADWebSiteSSOUsingThisProfileEnabled" -Value 1 -Type DWord -Changes ([ref]$changes)
@@ -700,23 +721,53 @@ function Enable-Kiosk {
     # that account into Edge automatically and makes the resulting profile
     # non-removable.
     Set-TrackedValue -Path $EdgePolicyPath -Name "ConfigureOnPremisesAccountAutoSignIn" -Value 1 -Type DWord -Changes ([ref]$changes)
-    # Block dangerous/potentially-dangerous downloads (SmartScreen-flagged or
-    # risky extensions) outright, without a user-overridable warning — normal
-    # file types (PDFs, Office docs, images, etc.) needed for M365 workflows
-    # still download normally.
-    Set-TrackedValue -Path $EdgePolicyPath -Name "DownloadRestrictions" -Value 1 -Type DWord -Changes ([ref]$changes)
+    # 3 = block all downloads; files stay in OneDrive/SharePoint.
+    Set-TrackedValue -Path $EdgePolicyPath -Name "DownloadRestrictions" -Value 3 -Type DWord -Changes ([ref]$changes)
+
+    # Keep the shared M365 session: no InPrivate, nothing cleared on exit.
+    Set-TrackedValue -Path $EdgePolicyPath -Name "InPrivateModeAvailability" -Value 1 -Type DWord -Changes ([ref]$changes)
+    Set-TrackedValue -Path $EdgePolicyPath -Name "ClearBrowsingDataOnExit" -Value 0 -Type DWord -Changes ([ref]$changes)
+    Set-TrackedValue -Path $EdgePolicyPath -Name "AllowDeletingBrowserHistory" -Value 0 -Type DWord -Changes ([ref]$changes)
+    Set-TrackedValue -Path $EdgePolicyPath -Name "SyncDisabled" -Value 1 -Type DWord -Changes ([ref]$changes)
+
+    # Password manager stays on so the shared M365 account password can be saved.
+    Set-TrackedValue -Path $EdgePolicyPath -Name "PasswordManagerEnabled" -Value 1 -Type DWord -Changes ([ref]$changes)
+    Set-TrackedValue -Path $EdgePolicyPath -Name "AutofillAddressEnabled" -Value 0 -Type DWord -Changes ([ref]$changes)
+    Set-TrackedValue -Path $EdgePolicyPath -Name "AutofillCreditCardEnabled" -Value 0 -Type DWord -Changes ([ref]$changes)
+    Set-TrackedValue -Path $EdgePolicyPath -Name "AutoImportAtFirstRun" -Value 4 -Type DWord -Changes ([ref]$changes)
+
+    # Declutter: sidebar/Copilot, shopping, rewards, promos, and address-bar search.
+    Set-TrackedValue -Path $EdgePolicyPath -Name "HubsSidebarEnabled" -Value 0 -Type DWord -Changes ([ref]$changes)
+    Set-TrackedValue -Path $EdgePolicyPath -Name "EdgeShoppingAssistantEnabled" -Value 0 -Type DWord -Changes ([ref]$changes)
+    Set-TrackedValue -Path $EdgePolicyPath -Name "ShowMicrosoftRewards" -Value 0 -Type DWord -Changes ([ref]$changes)
+    Set-TrackedValue -Path $EdgePolicyPath -Name "EdgeCollectionsEnabled" -Value 0 -Type DWord -Changes ([ref]$changes)
+    Set-TrackedValue -Path $EdgePolicyPath -Name "EdgeWorkspacesEnabled" -Value 0 -Type DWord -Changes ([ref]$changes)
+    Set-TrackedValue -Path $EdgePolicyPath -Name "ShowRecommendationsEnabled" -Value 0 -Type DWord -Changes ([ref]$changes)
+    Set-TrackedValue -Path $EdgePolicyPath -Name "SpotlightExperiencesAndRecommendationsEnabled" -Value 0 -Type DWord -Changes ([ref]$changes)
+    Set-TrackedValue -Path $EdgePolicyPath -Name "PromotionalTabsEnabled" -Value 0 -Type DWord -Changes ([ref]$changes)
+    Set-TrackedValue -Path $EdgePolicyPath -Name "UserFeedbackAllowed" -Value 0 -Type DWord -Changes ([ref]$changes)
+    Set-TrackedValue -Path $EdgePolicyPath -Name "DefaultSearchProviderEnabled" -Value 0 -Type DWord -Changes ([ref]$changes)
+    Set-TrackedValue -Path $EdgePolicyPath -Name "SearchSuggestEnabled" -Value 0 -Type DWord -Changes ([ref]$changes)
+
+    # Security
+    Set-TrackedValue -Path $EdgePolicyPath -Name "SmartScreenEnabled" -Value 1 -Type DWord -Changes ([ref]$changes)
+    Set-TrackedValue -Path $EdgePolicyPath -Name "PreventSmartScreenPromptOverride" -Value 1 -Type DWord -Changes ([ref]$changes)
+    Set-TrackedValue -Path $EdgePolicyPath -Name "PreventSmartScreenPromptOverrideForFiles" -Value 1 -Type DWord -Changes ([ref]$changes)
+    Set-TrackedValue -Path $EdgePolicyPath -Name "TaskManagerEndProcessEnabled" -Value 0 -Type DWord -Changes ([ref]$changes)
+    # Closing Edge fully exits it, so the next launch starts fresh at the homepage.
+    Set-TrackedValue -Path $EdgePolicyPath -Name "BackgroundModeEnabled" -Value 0 -Type DWord -Changes ([ref]$changes)
 
     # --- Disable the Windows Copilot taskbar button ---
     # Not an app pin (CustomTaskbarLayoutCollection/AllowedApps has no effect
-    # on it) — it's a separate shell UI element gated by its own policy, and
+    # on it) - it's a separate shell UI element gated by its own policy, and
     # Copilot isn't in AllowedApps, so it must be turned off here instead.
     Set-TrackedValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsCopilot" -Name "TurnOffWindowsCopilot" -Value 1 -Type DWord -Changes ([ref]$changes)
 
     # --- Per-user: disable Task Manager, scoped only to the kiosk account ---
-    # (HKU\<their SID>, not the machine-wide HKLM policy — no other user is affected)
+    # (HKU\<their SID>, not the machine-wide HKLM policy - no other user is affected)
     # ($kioskSid was already resolved above, for the admin-demotion check)
     if (-not $kioskSid) {
-        Write-Warning "Could not resolve a SID for '$KioskUser' — skipping the per-user Task Manager lockdown (rest of kiosk setup still applied)."
+        Write-Warning "Could not resolve a SID for '$KioskUser' - skipping the per-user Task Manager lockdown (rest of kiosk setup still applied)."
     } else {
         $profilePath = (Get-CimInstance -ClassName Win32_UserProfile -Filter "SID='$kioskSid'" -ErrorAction SilentlyContinue).LocalPath
         $hiveRoot = "Registry::HKEY_USERS\$kioskSid"
@@ -729,10 +780,10 @@ function Enable-Kiosk {
                 if ($LASTEXITCODE -eq 0) {
                     $loadedHere = $true
                 } else {
-                    Write-Warning "Failed to load the registry hive for $KioskUser — skipping the per-user Task Manager lockdown."
+                    Write-Warning "Failed to load the registry hive for $KioskUser - skipping the per-user Task Manager lockdown."
                 }
             } else {
-                Write-Warning "Could not find a profile (NTUSER.DAT) for $KioskUser — skipping the per-user Task Manager lockdown."
+                Write-Warning "Could not find a profile (NTUSER.DAT) for $KioskUser - skipping the per-user Task Manager lockdown."
             }
         }
         if ($hiveWasLoaded -or $loadedHere) {
@@ -748,7 +799,7 @@ function Enable-Kiosk {
             # kiosk shortcut pin, producing two Edge icons on the taskbar.
             # Both the Taskband registry key (pin order/metadata) and the
             # Quick Launch "User Pinned\TaskBar" folder (the actual pinned
-            # .lnk files) are backed up here — not deleted — so Disable-Kiosk
+            # .lnk files) are backed up here - not deleted - so Disable-Kiosk
             # can put the account's original taskbar back exactly.
             $taskbandKeyPath = "$hiveRoot\Software\Microsoft\Windows\CurrentVersion\Explorer\Taskband"
             $taskbandKeyExisted = Test-Path $taskbandKeyPath
@@ -779,7 +830,7 @@ function Enable-Kiosk {
                 [gc]::WaitForPendingFinalizers()
                 & reg.exe unload "HKU\$kioskSid" *> $null
                 if ($LASTEXITCODE -ne 0) {
-                    Write-Warning "Failed to unload the registry hive for $KioskUser after editing it — it may remain loaded until reboot, which can block that user from signing in."
+                    Write-Warning "Failed to unload the registry hive for $KioskUser after editing it - it may remain loaded until reboot, which can block that user from signing in."
                 }
             }
         }
@@ -788,7 +839,7 @@ function Enable-Kiosk {
     # --- Final re-verification pass ---
     # Something on some machines has been observed to delete these registry
     # values within seconds of them being written (all but the last one set
-    # were gone by the next reboot, with no Intune/GPO in play) — the
+    # were gone by the next reboot, with no Intune/GPO in play) - the
     # per-write Confirm-RegistryValue checks above wouldn't catch that since
     # they run immediately after each individual write. Re-reading
     # everything once more here, after all writes are done, narrows down
@@ -806,7 +857,7 @@ function Enable-Kiosk {
     Write-Host "  URLBlocklist entries present: $finalBlocklistCount (expected $($blockedInternalPages.Count + 1))"
     Write-Host "  URLAllowlist entries present: $finalAllowlistCount (expected $($domainsToApply.Count))"
     if ($verifyFailures -gt 0 -or $finalBlocklistCount -ne ($blockedInternalPages.Count + 1) -or $finalAllowlistCount -ne $domainsToApply.Count) {
-        Write-Warning "$verifyFailures tracked value(s) and/or the URLBlocklist/URLAllowlist counts no longer match what was just written — something is reverting these registry values during the script run itself, not just afterward."
+        Write-Warning "$verifyFailures tracked value(s) and/or the URLBlocklist/URLAllowlist counts no longer match what was just written - something is reverting these registry values during the script run itself, not just afterward."
     } else {
         Write-Host "  All tracked values still present immediately after the run completed."
     }
@@ -814,7 +865,7 @@ function Enable-Kiosk {
     $succeeded = $true
 
     } catch {
-        # Include the failing line and exception type/HResult — generic COM
+        # Include the failing line and exception type/HResult - generic COM
         # errors from the Assigned Access WMI Bridge (e.g. "A general error
         # occurred that is not covered by a more specific error code") give
         # no detail otherwise, making it impossible to tell which step failed.
@@ -823,7 +874,7 @@ function Enable-Kiosk {
         # CimException wraps the real MDM/CSP failure reason in properties
         # that $_.Exception.Message never includes (Message is always the
         # same generic "A general error occurred..." string for this
-        # provider) — NativeErrorCode/StatusCode are the actual MI_RESULT
+        # provider) - NativeErrorCode/StatusCode are the actual MI_RESULT
         # code, and ErrorData (when present) is a CimInstance carrying the
         # CSP's own error text and URI, which is what actually explains a
         # rejected Assigned Access config.
@@ -856,7 +907,7 @@ function Enable-Kiosk {
 function Disable-Kiosk {
     Write-Host "Removing kiosk configuration..."
     if (-not (Test-Path $StateFile)) {
-        Write-Warning "No state file found at $StateFile — nothing recorded to precisely revert. Attempting best-effort cleanup only."
+        Write-Warning "No state file found at $StateFile - nothing recorded to precisely revert. Attempting best-effort cleanup only."
         Remove-Item -Path $XmlPath -Force -ErrorAction SilentlyContinue
         Remove-Item -Path $EdgeShortcutPath -Force -ErrorAction SilentlyContinue
         return
@@ -864,7 +915,7 @@ function Disable-Kiosk {
     try {
         $state = Get-Content -Path $StateFile -Raw | ConvertFrom-Json
     } catch {
-        Write-Warning "State file at $StateFile is corrupt or unreadable ($($_.Exception.Message)) — nothing recorded to precisely revert. Attempting best-effort cleanup only."
+        Write-Warning "State file at $StateFile is corrupt or unreadable ($($_.Exception.Message)) - nothing recorded to precisely revert. Attempting best-effort cleanup only."
         Remove-Item -Path $XmlPath -Force -ErrorAction SilentlyContinue
         Remove-Item -Path $EdgeShortcutPath -Force -ErrorAction SilentlyContinue
         return
@@ -900,10 +951,10 @@ function Disable-Kiosk {
                 if ($LASTEXITCODE -eq 0) {
                     $perUserHiveReloadedHere = $true
                 } else {
-                    Write-Warning "Failed to reload the kiosk user's registry hive — their Task Manager value may not be restored."
+                    Write-Warning "Failed to reload the kiosk user's registry hive - their Task Manager value may not be restored."
                 }
             } else {
-                Write-Warning "Could not find the kiosk user's profile — their Task Manager value may not be restored."
+                Write-Warning "Could not find the kiosk user's profile - their Task Manager value may not be restored."
             }
         }
     }
@@ -936,7 +987,7 @@ function Disable-Kiosk {
         [gc]::WaitForPendingFinalizers()
         & reg.exe unload "HKU\$($state.PerUserHive.Sid)" *> $null
         if ($LASTEXITCODE -ne 0) {
-            Write-Warning "Failed to unload the kiosk user's registry hive after reverting it — it may remain loaded until reboot, which can block that user from signing in."
+            Write-Warning "Failed to unload the kiosk user's registry hive after reverting it - it may remain loaded until reboot, which can block that user from signing in."
         }
     }
 
@@ -962,7 +1013,7 @@ function Disable-Kiosk {
     }
 
     } catch {
-        Write-Error "Kiosk disable failed partway through: $($_.Exception.Message). The recorded state at $StateFile was left in place — re-run '.\kioskMode.ps1 -Enabled false' to retry."
+        Write-Error "Kiosk disable failed partway through: $($_.Exception.Message). The recorded state at $StateFile was left in place - re-run '.\kioskMode.ps1 -Enabled false' to retry."
         exit 1
     }
 

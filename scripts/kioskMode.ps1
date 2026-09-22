@@ -445,16 +445,27 @@ function Resolve-KioskUserSid {
     # settings can be scoped to exactly that account and no other.
     param([string]$KioskUser)
 
-    if ($KioskUser -notmatch '^(?i)AzureAD\\') {
-        try {
-            return (New-Object System.Security.Principal.NTAccount($KioskUser)).Translate([System.Security.Principal.SecurityIdentifier]).Value
-        } catch { }
+    # Works for "AzureAD\user@tenant.com" too on an Azure AD-joined machine
+    # (confirmed by testing).
+    try {
+        return (New-Object System.Security.Principal.NTAccount($KioskUser)).Translate([System.Security.Principal.SecurityIdentifier]).Value
+    } catch { }
+
+    # Azure AD fallback: Windows caches each AAD account that has signed in
+    # here, keyed by SID, with its UPN - an exact match, unlike profile
+    # folder names, which don't reliably follow the UPN (e.g.
+    # workshop@lbssheetmetal.info -> C:\Users\Workshop-LBSSheetMet).
+    $shortName = ($KioskUser -split '\\')[-1]
+    if ($shortName -like '*@*') {
+        $cachedSid = Get-ChildItem "HKLM:\SOFTWARE\Microsoft\IdentityStore\Cache" -ErrorAction SilentlyContinue |
+            ForEach-Object { Get-ChildItem (Join-Path $_.PSPath "IdentityCache") -ErrorAction SilentlyContinue } |
+            Where-Object { (Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue).UserName -eq $shortName } |
+            Select-Object -First 1 -ExpandProperty PSChildName
+        if ($cachedSid) { return $cachedSid }
     }
 
-    # Fall back to matching against local profile folders - handles Azure AD
-    # accounts (and anything NTAccount couldn't resolve directly), since a
-    # signed-in AAD user's profile folder is named after their UPN's local part.
-    $shortName = ($KioskUser -split '\\')[-1]
+    # Last resort: match against local profile folders named after the
+    # account name / UPN's local part.
     $aliasStem = ($shortName -split '@')[0]
     return Get-CimInstance -ClassName Win32_UserProfile -ErrorAction SilentlyContinue |
         Where-Object {
@@ -962,6 +973,15 @@ function Enable-Kiosk {
     Write-Host "Re-checking all tracked registry values..."
     $verifyFailures = 0
     foreach ($change in ($changes | Where-Object { $null -ne $_.NewValue })) {
+        # Per-user values live in the kiosk account's hive, which this script
+        # unloads again above if it had to load it (user not signed in) -
+        # they can't be re-read once it's gone, and were already verified at
+        # write time.
+        if ($perUserHiveState -and
+            $change.Path -like "Registry::HKEY_USERS\$($perUserHiveState.Sid)\*" -and
+            -not (Test-Path "Registry::HKEY_USERS\$($perUserHiveState.Sid)")) {
+            continue
+        }
         if (-not (Confirm-RegistryValue -Path $change.Path -Name $change.Name -ExpectedValue $change.NewValue)) {
             $verifyFailures++
         }

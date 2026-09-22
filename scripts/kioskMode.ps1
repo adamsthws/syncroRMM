@@ -3,7 +3,9 @@
 
     Deploys (or fully removes) a Windows 11 25H2+ multi-app kiosk: OneAuth + a
     restricted, non-InPrivate Microsoft Edge locked to Microsoft 365 domains,
-    both pinned to Start and the taskbar.
+    both pinned to Start and the taskbar. Edge auto-launches at sign-in and,
+    via two \Kiosk\ scheduled tasks, whenever the kiosk session is unlocked
+    with Edge closed.
     Also disables Task Manager and "Change a password" on the Ctrl+Alt+Del
     screen for the kiosk account only, via that user's own registry hive -
     no other account on the machine is affected.
@@ -234,6 +236,11 @@ $LegacyEdgeShortcutPath = Join-Path $StartMenuProgramsDir "Edge-Kiosk.lnk"
 # default location.
 $EdgeShortcutEnvPath = "%ALLUSERSPROFILE%\Microsoft\Windows\Start Menu\Programs\Microsoft Edge.lnk"
 $EdgePolicyPath = "HKLM:\SOFTWARE\Policies\Microsoft\Edge"
+# Scheduled tasks that relaunch Edge when the kiosk session is unlocked (see
+# Register-EdgeUnlockTasks). Assigned Access's AutoLaunch covers sign-in only.
+$KioskTaskPath = "\Kiosk\"
+$UnlockWatchTaskName = "EdgeOnUnlock"
+$EdgeLaunchTaskName = "LaunchEdge"
 $ProfileGuid = "{4c9a1e2b-6f3d-4a8e-9c2f-8b1d5e7a3c90}"
 # Package name (e.g. "ZohoCorp.44386D730E544"), as Get-AppxPackage/
 # Get-AppxProvisionedPackage report it - the AUMID minus publisher hash and app ID.
@@ -550,6 +557,80 @@ function Install-OneAuth {
     }
 }
 
+function Resolve-KioskTaskAccount {
+    # Task Scheduler takes an account name and resolves it to a SID itself,
+    # but an Azure AD SID translates to a display-name form
+    # ("AzureAD\Workshop-LBSSheetMet") that doesn't resolve back, and that's
+    # also what "CurrentUser" yields. Only "AzureAD\<UPN>" round-trips, so
+    # use $KioskUser if it resolves to this SID, else look up the UPN.
+    param([string]$KioskUser, [string]$KioskSid)
+    try {
+        $sid = (New-Object System.Security.Principal.NTAccount($KioskUser)).Translate([System.Security.Principal.SecurityIdentifier]).Value
+        if ($sid -eq $KioskSid) { return $KioskUser }
+    } catch { }
+    $upn = Get-ChildItem "HKLM:\SOFTWARE\Microsoft\IdentityStore\Cache" -ErrorAction SilentlyContinue |
+        ForEach-Object { Get-Item (Join-Path $_.PSPath "IdentityCache\$KioskSid") -ErrorAction SilentlyContinue } |
+        ForEach-Object { (Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue).UserName } |
+        Where-Object { $_ } | Select-Object -First 1
+    if ($upn) { return "AzureAD\$upn" }
+    return $KioskUser
+}
+
+function Register-EdgeUnlockTasks {
+    param([string]$KioskSid, [string]$TaskAccount, [string]$EdgeExePath)
+    # Two tasks, because Assigned Access's AppLocker rules only let the kiosk
+    # account run AllowedApps - it can't run a script to check whether Edge is
+    # already open (launching msedge.exe unconditionally would stack up a new
+    # window on every unlock). So:
+    #  - EdgeOnUnlock runs as SYSTEM on the kiosk account's unlock, and starts
+    #    LaunchEdge only if that account has no msedge.exe running.
+    #  - LaunchEdge runs msedge.exe as the kiosk account in its interactive
+    #    session (msedge.exe is in AllowedApps, so it's permitted).
+    Unregister-EdgeUnlockTasks
+
+    $launchPrincipal = New-ScheduledTaskPrincipal -UserId $TaskAccount -LogonType Interactive -RunLevel Limited
+    # ExecutionTimeLimit 0 = no limit; otherwise Task Scheduler kills Edge after 72h.
+    $launchSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)
+    Register-ScheduledTask -TaskPath $KioskTaskPath -TaskName $EdgeLaunchTaskName `
+        -Action (New-ScheduledTaskAction -Execute $EdgeExePath) `
+        -Principal $launchPrincipal -Settings $launchSettings -ErrorAction Stop | Out-Null
+
+    $check = @"
+`$running = Get-CimInstance Win32_Process -Filter "Name='msedge.exe'" |
+    Where-Object { (Invoke-CimMethod -InputObject `$_ -MethodName GetOwnerSid).Sid -eq '$KioskSid' }
+if (-not `$running) { Start-ScheduledTask -TaskPath '$KioskTaskPath' -TaskName '$EdgeLaunchTaskName' }
+"@
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($check))
+    $watchAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand $encoded"
+    $unlockTriggerClass = Get-CimClass -Namespace "ROOT\Microsoft\Windows\TaskScheduler" -ClassName "MSFT_TaskSessionStateChangeTrigger"
+    $unlockTrigger = New-CimInstance -CimClass $unlockTriggerClass -ClientOnly
+    $unlockTrigger.StateChange = 8   # TASK_SESSION_UNLOCK
+    $unlockTrigger.UserId = $TaskAccount
+    $unlockTrigger.Enabled = $true
+    $watchSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 5)
+    Register-ScheduledTask -TaskPath $KioskTaskPath -TaskName $UnlockWatchTaskName `
+        -Action $watchAction -Trigger $unlockTrigger `
+        -Principal (New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest) `
+        -Settings $watchSettings -ErrorAction Stop | Out-Null
+}
+
+function Unregister-EdgeUnlockTasks {
+    foreach ($name in $UnlockWatchTaskName, $EdgeLaunchTaskName) {
+        if (Get-ScheduledTask -TaskPath $KioskTaskPath -TaskName $name -ErrorAction SilentlyContinue) {
+            Unregister-ScheduledTask -TaskPath $KioskTaskPath -TaskName $name -Confirm:$false
+        }
+    }
+    # Remove the \Kiosk\ folder too, if it's now empty.
+    try {
+        $scheduler = New-Object -ComObject Schedule.Service
+        $scheduler.Connect()
+        $folder = $scheduler.GetFolder($KioskTaskPath.TrimEnd('\'))
+        if ($folder.GetTasks(1).Count -eq 0 -and $folder.GetFolders(0).Count -eq 0) {
+            $scheduler.GetFolder("\").DeleteFolder($KioskTaskPath.Trim('\'), 0)
+        }
+    } catch { }
+}
+
 function Enable-Kiosk {
     Write-Host "Enabling kiosk configuration..."
     $workDirPreExisted = Test-Path $WorkDir
@@ -651,7 +732,7 @@ function Enable-Kiosk {
             <AllAppsList>
                 <AllowedApps>
                     <App AppUserModelId="$OneAuthAUMID" />
-                    <App DesktopAppPath="$edgeExePath" />
+                    <App DesktopAppPath="$edgeExePath" rs5:AutoLaunch="true" />
                     <App AppUserModelId="MSEdge" />
                 </AllowedApps>
             </AllAppsList>
@@ -716,7 +797,8 @@ function Enable-Kiosk {
     $blockedInternalPages = @(
         "edge://settings", "edge://settings/*", "edge://extensions",
         "edge://extensions/*", "edge://flags", "edge://flags/*",
-        "edge://version", "edge://net-internals", "edge://net-internals/*"
+        "edge://version", "edge://net-internals", "edge://net-internals/*",
+        "edge://history", "edge://history/*", "edge://favorites", "edge://favorites/*"
     )
     $i = 2
     foreach ($page in $blockedInternalPages) {
@@ -760,6 +842,9 @@ function Enable-Kiosk {
     }
 
     Set-TrackedValue -Path $EdgePolicyPath -Name "RestoreOnStartup" -Value 4 -Type DWord -Changes ([ref]$changes)
+    # No "Restore pages?" prompt after an unclean shutdown - always land on
+    # the start page instead.
+    Set-TrackedValue -Path $EdgePolicyPath -Name "HideRestoreDialogEnabled" -Value 1 -Type DWord -Changes ([ref]$changes)
     $restoreUrlsExisted = Test-Path "$EdgePolicyPath\RestoreOnStartupURLs"
     if ($restoreUrlsExisted) {
         # Clear any pre-existing entries first (e.g. leftover "2", "3", ...
@@ -804,6 +889,11 @@ function Enable-Kiosk {
     Set-TrackedValue -Path $EdgePolicyPath -Name "BrowserAddPersonEnabled" -Value 0 -Type DWord -Changes ([ref]$changes)
     Set-TrackedValue -Path $EdgePolicyPath -Name "BrowserGuestModeEnabled" -Value 0 -Type DWord -Changes ([ref]$changes)
     Set-TrackedValue -Path $EdgePolicyPath -Name "EditFavoritesEnabled" -Value 0 -Type DWord -Changes ([ref]$changes)
+    # No favorites or history for a shared account: hide the favorites bar and
+    # stop recording history (edge://favorites and edge://history are also in
+    # the URLBlocklist above). Doesn't touch cookies, so M365 stays signed in.
+    Set-TrackedValue -Path $EdgePolicyPath -Name "FavoritesBarEnabled" -Value 0 -Type DWord -Changes ([ref]$changes)
+    Set-TrackedValue -Path $EdgePolicyPath -Name "SavingBrowserHistoryDisabled" -Value 1 -Type DWord -Changes ([ref]$changes)
     Set-TrackedValue -Path $EdgePolicyPath -Name "BrowserSignin" -Value 2 -Type DWord -Changes ([ref]$changes)
     # "Automatically sign in to sites with your current work or school
     # account" (Settings > Profiles > Profile preferences) - lets M365 web
@@ -847,6 +937,8 @@ function Enable-Kiosk {
     # HubsSidebarEnabled doesn't cover the toolbar Copilot button Entra ID
     # profiles get (Microsoft 365 Copilot Chat) - that has its own policy.
     Set-TrackedValue -Path $EdgePolicyPath -Name "Microsoft365CopilotChatIconEnabled" -Value 0 -Type DWord -Changes ([ref]$changes)
+    # No "Install <site> as an app" prompts/address-bar icon (Edge 145+).
+    Set-TrackedValue -Path $EdgePolicyPath -Name "WebAppInstallByUserEnabled" -Value 0 -Type DWord -Changes ([ref]$changes)
     Set-TrackedValue -Path $EdgePolicyPath -Name "EdgeShoppingAssistantEnabled" -Value 0 -Type DWord -Changes ([ref]$changes)
     Set-TrackedValue -Path $EdgePolicyPath -Name "ShowMicrosoftRewards" -Value 0 -Type DWord -Changes ([ref]$changes)
     Set-TrackedValue -Path $EdgePolicyPath -Name "EdgeCollectionsEnabled" -Value 0 -Type DWord -Changes ([ref]$changes)
@@ -865,6 +957,9 @@ function Enable-Kiosk {
     Set-TrackedValue -Path $EdgePolicyPath -Name "TaskManagerEndProcessEnabled" -Value 0 -Type DWord -Changes ([ref]$changes)
     # Closing Edge fully exits it, so the next launch starts fresh at the homepage.
     Set-TrackedValue -Path $EdgePolicyPath -Name "BackgroundModeEnabled" -Value 0 -Type DWord -Changes ([ref]$changes)
+    # Startup boost keeps windowless msedge.exe processes alive, which would
+    # make the unlock task think Edge is already open and skip relaunching it.
+    Set-TrackedValue -Path $EdgePolicyPath -Name "StartupBoostEnabled" -Value 0 -Type DWord -Changes ([ref]$changes)
 
     # Silently deny M365 pages access to localhost/LAN (only used to reach the
     # OneDrive sync client), which suppresses the "connect to local devices" prompt.
@@ -955,6 +1050,19 @@ function Enable-Kiosk {
         }
     }
 
+    # --- Relaunch Edge on unlock (sign-in is covered by AutoLaunch in the XML) ---
+    if ($kioskSid) {
+        try {
+            $taskAccount = Resolve-KioskTaskAccount -KioskUser $KioskUser -KioskSid $kioskSid
+            Register-EdgeUnlockTasks -KioskSid $kioskSid -TaskAccount $taskAccount -EdgeExePath $edgeExePath
+            Write-Host "  [OK] Scheduled tasks $KioskTaskPath$UnlockWatchTaskName / $EdgeLaunchTaskName registered for $taskAccount (Edge relaunches on unlock)."
+        } catch {
+            Write-Warning "Could not register the Edge-on-unlock scheduled tasks ($($_.Exception.Message)) - Edge will still auto-launch at sign-in, but not on unlock."
+        }
+    } else {
+        Write-Warning "No SID for '$KioskUser' - skipping the Edge-on-unlock scheduled tasks."
+    }
+
     # --- Final re-verification pass ---
     # Something on some machines has been observed to delete these registry
     # values within seconds of them being written (all but the last one set
@@ -1038,6 +1146,7 @@ function Disable-Kiosk {
         Write-Warning "No state file found at $StateFile - nothing recorded to precisely revert. Attempting best-effort cleanup only."
         Remove-Item -Path $XmlPath -Force -ErrorAction SilentlyContinue
         Remove-Item -Path $LegacyEdgeShortcutPath -Force -ErrorAction SilentlyContinue
+        Unregister-EdgeUnlockTasks
         return
     }
     try {
@@ -1046,6 +1155,7 @@ function Disable-Kiosk {
         Write-Warning "State file at $StateFile is corrupt or unreadable ($($_.Exception.Message)) - nothing recorded to precisely revert. Attempting best-effort cleanup only."
         Remove-Item -Path $XmlPath -Force -ErrorAction SilentlyContinue
         Remove-Item -Path $LegacyEdgeShortcutPath -Force -ErrorAction SilentlyContinue
+        Unregister-EdgeUnlockTasks
         return
     }
 
@@ -1163,6 +1273,7 @@ function Disable-Kiosk {
     # --- Remove files this script created ---
     Remove-Item -Path $XmlPath -Force -ErrorAction SilentlyContinue
     Remove-Item -Path $LegacyEdgeShortcutPath -Force -ErrorAction SilentlyContinue
+    Unregister-EdgeUnlockTasks
     Remove-Item -Path $StateFile -Force -ErrorAction SilentlyContinue
     if (-not $state.WorkDirPreExisted) {
         Remove-Item -Path $WorkDir -Recurse -Force -ErrorAction SilentlyContinue

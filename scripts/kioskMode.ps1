@@ -7,6 +7,9 @@
     Also disables Task Manager and "Change a password" on the Ctrl+Alt+Del
     screen for the kiosk account only, via that user's own registry hive -
     no other account on the machine is affected.
+    If OneAuth isn't already installed for the kiosk account (or provisioned
+    for the machine), it's provisioned machine-wide from the Microsoft Store
+    via winget, and removed again on -Enabled false.
     Fully self-contained - writes the Assigned Access XML it needs to
     C:\ProgramData\Kiosk\, plus the Edge shortcut Start/taskbar pinning
     requires into the All Users Start Menu, at runtime.
@@ -107,7 +110,10 @@ $ErrorActionPreference = "Stop"
 # CONFIGURATION - edit before first use
 # ===========================================================================
 $OneAuthAUMID   = "ZohoCorp.44386D730E544_hfrrf6a1akhx2!App"   # Zoho OneAuth
-$HomepageUrl    = "https://m365.cloud.microsoft/apps"
+# Microsoft Store product ID for OneAuth (apps.microsoft.com/detail/<id>) -
+# used to provision it machine-wide via winget if it's missing.
+$OneAuthStoreId = "9NPG98QLH8JN"
+$HomepageUrl    = "https://lbssheet-my.sharepoint.com/favorites"
 # Fallback only - used when the live fetch from Microsoft's endpoint list
 # (see Get-M365AllowedDomains below) fails or fails its sanity check AND
 # there is no already-applied allowlist on the machine to fall back to
@@ -236,6 +242,9 @@ $EdgeShortcutPath = Join-Path $StartMenuProgramsDir $EdgeShortcutName
 $EdgeShortcutEnvPath = "%ALLUSERSPROFILE%\Microsoft\Windows\Start Menu\Programs\$EdgeShortcutName"
 $EdgePolicyPath = "HKLM:\SOFTWARE\Policies\Microsoft\Edge"
 $ProfileGuid = "{4c9a1e2b-6f3d-4a8e-9c2f-8b1d5e7a3c90}"
+# Package name (e.g. "ZohoCorp.44386D730E544"), as Get-AppxPackage/
+# Get-AppxProvisionedPackage report it - the AUMID minus publisher hash and app ID.
+$OneAuthPackageName = (($OneAuthAUMID -split '!')[0] -split '_')[0]
 
 # ===========================================================================
 # Resolve desired state:
@@ -322,12 +331,9 @@ if ($EnableKiosk) {
 # Helpers
 # ===========================================================================
 function Confirm-RegistryValue {
-    # Re-reads a value immediately after it's written and logs whether it
-    # actually stuck. This is diagnostic only - it catches something else on
-    # the machine reverting/deleting policy values the instant we write them
-    # (seen in the field: everything but the last-written value was gone by
-    # the time edge://policy was checked), which a normal try/catch around
-    # New-ItemProperty would never surface since the write itself succeeds.
+    # Re-reads a value right after writing it. Diagnostic only: catches values
+    # silently lost after a successful write, which try/catch can't surface
+    # (e.g. New-Item -Force recreating an existing key and wiping its values).
     param($Path, $Name, $ExpectedValue)
     $actual = Get-ItemProperty -Path $Path -Name $Name -ErrorAction SilentlyContinue
     if ($actual -and "$($actual.$Name)" -eq "$ExpectedValue") {
@@ -458,6 +464,88 @@ function Resolve-KioskUserSid {
         Select-Object -First 1 -ExpandProperty SID
 }
 
+function Get-SystemWingetPath {
+    # winget isn't on PATH for SYSTEM (it's a per-user App Execution Alias),
+    # so find the newest App Installer package directly. Run as SYSTEM,
+    # winget.exe also can't resolve its VC++ runtime dependency and exits
+    # immediately with 0xC0000135 (STATUS_DLL_NOT_FOUND) - confirmed by
+    # testing - so the VCLibs package folder is prepended to PATH as well.
+    $windowsApps = Join-Path $env:ProgramFiles "WindowsApps"
+    $newest = {
+        param($Filter)
+        Get-ChildItem -Path $windowsApps -Directory -Filter $Filter -ErrorAction SilentlyContinue |
+            Sort-Object { [version](($_.Name -split '_')[1]) } -Descending |
+            Select-Object -First 1
+    }
+    $wingetDir = & $newest "Microsoft.DesktopAppInstaller_*_x64__8wekyb3d8bbwe"
+    if (-not $wingetDir -or -not (Test-Path (Join-Path $wingetDir.FullName "winget.exe"))) { return $null }
+    $vclibsDir = & $newest "Microsoft.VCLibs.140.00.UWPDesktop_*_x64__8wekyb3d8bbwe"
+    if ($vclibsDir -and $env:PATH -notlike "*$($vclibsDir.FullName)*") {
+        $env:PATH = "$($vclibsDir.FullName);$env:PATH"
+    }
+    return Join-Path $wingetDir.FullName "winget.exe"
+}
+
+function Install-OneAuth {
+    # Makes sure OneAuth will be available to the kiosk account. Skips if
+    # it's already installed for that account or already provisioned for
+    # the machine; otherwise provisions it machine-wide from the Microsoft
+    # Store via winget (--scope machine), so Windows installs it for the
+    # kiosk account at its next sign-in. Returns a state object describing
+    # what it did (so Disable-Kiosk can undo only that), or $null if nothing
+    # was installed. Never throws - failure only means a missing OneAuth
+    # tile, which isn't worth aborting the rest of the kiosk setup over.
+    param([string]$KioskSid)
+    try {
+        $provisioned = Get-AppxProvisionedPackage -Online | Where-Object DisplayName -eq $OneAuthPackageName
+        if ($provisioned) {
+            Write-Host "OneAuth is already provisioned for this machine ($($provisioned.Version)) - skipping install."
+            return $null
+        }
+        # Filtered from -AllUsers rather than using Get-AppxPackage -User
+        # $KioskSid, which throws "No valid SID could be determined" for an
+        # Azure AD account's SID on a machine that can't resolve it.
+        # Also recorded so Disable-Kiosk only removes OneAuth from accounts
+        # this install added it to, not from anyone who already had it.
+        $preExistingUserSids = @(
+            Get-AppxPackage -AllUsers -Name $OneAuthPackageName |
+                ForEach-Object { $_.PackageUserInformation } |
+                ForEach-Object { $_.UserSecurityId.Sid }
+        )
+        if ($KioskSid -and $preExistingUserSids -contains $KioskSid) {
+            Write-Host "OneAuth is already installed for '$KioskUser' - skipping install."
+            return $null
+        }
+
+        $winget = Get-SystemWingetPath
+        if (-not $winget) {
+            Write-Warning "OneAuth isn't installed and winget (App Installer) couldn't be found - the OneAuth tile will be missing until it's installed."
+            return $null
+        }
+        Write-Host "OneAuth not found - provisioning it machine-wide from the Microsoft Store ($OneAuthStoreId)..."
+        $wingetOutput = & $winget install --id $OneAuthStoreId --source msstore --scope machine `
+            --accept-package-agreements --accept-source-agreements --disable-interactivity | Out-String
+        $wingetExit = $LASTEXITCODE
+        Write-Host $wingetOutput.Trim()
+
+        # Judge success by the actual provisioned state, not winget's exit
+        # code alone (it has several non-zero "nothing to do" codes).
+        $provisioned = Get-AppxProvisionedPackage -Online | Where-Object DisplayName -eq $OneAuthPackageName
+        if (-not $provisioned) {
+            Write-Warning ("OneAuth install failed (winget exit code 0x{0:X8}) - the OneAuth tile will be missing until it's installed." -f $wingetExit)
+            return $null
+        }
+        Write-Host "  [OK] OneAuth $($provisioned.Version) provisioned for all users."
+        return [PSCustomObject]@{
+            ProvisionedPackageName = $provisioned.PackageName
+            PreExistingUserSids    = $preExistingUserSids
+        }
+    } catch {
+        Write-Warning "OneAuth install check/install failed: $($_.Exception.Message) - the OneAuth tile will be missing until it's installed."
+        return $null
+    }
+}
+
 function Enable-Kiosk {
     Write-Host "Enabling kiosk configuration..."
     $workDirPreExisted = Test-Path $WorkDir
@@ -475,6 +563,7 @@ function Enable-Kiosk {
     $restoreUrlsExisted = $false
     $perUserHiveState = $null
     $demotedFromAdmin = $null
+    $oneAuthInstalled = $null
 
     function Save-KioskState {
         $state = [PSCustomObject]@{
@@ -487,6 +576,7 @@ function Enable-Kiosk {
             RegistryChanges               = $changes
             PerUserHive                   = $perUserHiveState
             DemotedFromAdmin              = $demotedFromAdmin
+            OneAuthInstalled              = $oneAuthInstalled
         }
         $state | ConvertTo-Json -Depth 5 | Set-Content -Path $StateFile -Encoding UTF8
     }
@@ -522,6 +612,11 @@ function Enable-Kiosk {
     } else {
         Write-Warning "Could not resolve a SID for '$KioskUser' - cannot verify it isn't a local administrator (Assigned Access will fail with an opaque error if it is)."
     }
+
+    # --- Make sure OneAuth (the kiosk's packaged app) is available to the
+    # kiosk account - Assigned Access doesn't install apps, it just shows
+    # nothing for an AUMID that isn't installed. ---
+    $oneAuthInstalled = Install-OneAuth -KioskSid $kioskSid
 
     # --- Build a dedicated Edge shortcut with the homepage/flags baked in
     # (see the note above $EdgeShortcutPath - the CSP has no attribute for
@@ -732,6 +827,15 @@ function Enable-Kiosk {
 
     # Password manager stays on so the shared M365 account password can be saved.
     Set-TrackedValue -Path $EdgePolicyPath -Name "PasswordManagerEnabled" -Value 1 -Type DWord -Changes ([ref]$changes)
+    # ...but not on SharePoint/OneDrive, so it doesn't offer to save passwords of
+    # encrypted Office files opened in the browser. The M365 sign-in page is
+    # login.microsoftonline.com, so it's unaffected.
+    $passwordManagerBlockedOrigins = @("https://lbssheet-my.sharepoint.com", "https://lbssheet.sharepoint.com", "https://ukc-excel.officeapps.live.com", "https://ukw-excel.officeapps.live.com", "https://excel.officeapps.live.com")
+    $i = 1
+    foreach ($origin in $passwordManagerBlockedOrigins) {
+        Set-TrackedValue -Path "$EdgePolicyPath\PasswordManagerBlocklist" -Name "$i" -Value $origin -Type String -Changes ([ref]$changes)
+        $i++
+    }
     Set-TrackedValue -Path $EdgePolicyPath -Name "AutofillAddressEnabled" -Value 0 -Type DWord -Changes ([ref]$changes)
     Set-TrackedValue -Path $EdgePolicyPath -Name "AutofillCreditCardEnabled" -Value 0 -Type DWord -Changes ([ref]$changes)
     Set-TrackedValue -Path $EdgePolicyPath -Name "AutoImportAtFirstRun" -Value 4 -Type DWord -Changes ([ref]$changes)
@@ -756,6 +860,16 @@ function Enable-Kiosk {
     Set-TrackedValue -Path $EdgePolicyPath -Name "TaskManagerEndProcessEnabled" -Value 0 -Type DWord -Changes ([ref]$changes)
     # Closing Edge fully exits it, so the next launch starts fresh at the homepage.
     Set-TrackedValue -Path $EdgePolicyPath -Name "BackgroundModeEnabled" -Value 0 -Type DWord -Changes ([ref]$changes)
+
+    # Silently deny M365 pages access to localhost/LAN (only used to reach the
+    # OneDrive sync client), which suppresses the "connect to local devices" prompt.
+    # Uses content-settings pattern syntax ([*.]), unlike URLAllowlist.
+    $lnaBlockedOrigins = @("https://[*.]sharepoint.com", "https://[*.]cloud.microsoft", "https://[*.]office.com", "https://onedrive.live.com")
+    $i = 1
+    foreach ($origin in $lnaBlockedOrigins) {
+        Set-TrackedValue -Path "$EdgePolicyPath\LocalNetworkAccessBlockedForUrls" -Name "$i" -Value $origin -Type String -Changes ([ref]$changes)
+        $i++
+    }
 
     # --- Disable the Windows Copilot taskbar button ---
     # Not an app pin (CustomTaskbarLayoutCollection/AllowedApps has no effect
@@ -936,6 +1050,34 @@ function Disable-Kiosk {
             Add-LocalGroupMember -Group "Administrators" -Member $state.DemotedFromAdmin.Sid -ErrorAction Stop
         } catch {
             Write-Warning "Failed to restore the kiosk account to Administrators: $($_.Exception.Message)"
+        }
+    }
+
+    # --- Remove OneAuth if enabling installed it: deprovision it first (so
+    # it isn't reinstalled at anyone's next sign-in), then uninstall it only
+    # from accounts that didn't already have it before. ---
+    if ($state.OneAuthInstalled -and $state.OneAuthInstalled.ProvisionedPackageName) {
+        try {
+            Remove-AppxProvisionedPackage -Online -PackageName $state.OneAuthInstalled.ProvisionedPackageName -ErrorAction Stop | Out-Null
+            $preExistingSids = @($state.OneAuthInstalled.PreExistingUserSids | Where-Object { $_ })
+            if ($preExistingSids.Count -eq 0) {
+                # Nobody had it before, so remove it for everyone - avoids
+                # Remove-AppxPackage -User, which can't resolve an Azure AD
+                # account's SID on some machines.
+                Get-AppxPackage -AllUsers -Name $OneAuthPackageName |
+                    ForEach-Object { Remove-AppxPackage -Package $_.PackageFullName -AllUsers -ErrorAction Stop }
+            } else {
+                foreach ($pkg in (Get-AppxPackage -AllUsers -Name $OneAuthPackageName)) {
+                    foreach ($userInfo in $pkg.PackageUserInformation) {
+                        $sid = $userInfo.UserSecurityId.Sid
+                        if ($sid -and $preExistingSids -notcontains $sid) {
+                            Remove-AppxPackage -Package $pkg.PackageFullName -User $sid -ErrorAction Stop
+                        }
+                    }
+                }
+            }
+        } catch {
+            Write-Warning "Failed to fully remove OneAuth installed by kiosk mode: $($_.Exception.Message)"
         }
     }
 

@@ -33,7 +33,7 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
 }
 
 $EdgePolicyPath = "HKLM:\SOFTWARE\Policies\Microsoft\Edge"
-$HomepageUrl = "https://m365.cloud.microsoft/apps"
+$HomepageUrl = "https://lbssheet-my.sharepoint.com/favorites"
 $StateFile = Join-Path $env:TEMP "testEdgePolicyOnly-state.json"
 
 # --- Allowlist domains: copied verbatim from kioskMode.ps1 (keep in sync) ---
@@ -321,6 +321,12 @@ Set-TrackedValue -Path $EdgePolicyPath -Name "ClearBrowsingDataOnExit" -Value 0 
 Set-TrackedValue -Path $EdgePolicyPath -Name "AllowDeletingBrowserHistory" -Value 0 -Type DWord -Changes ([ref]$changes)
 Set-TrackedValue -Path $EdgePolicyPath -Name "SyncDisabled" -Value 1 -Type DWord -Changes ([ref]$changes)
 Set-TrackedValue -Path $EdgePolicyPath -Name "PasswordManagerEnabled" -Value 1 -Type DWord -Changes ([ref]$changes)
+$passwordManagerBlockedOrigins = @("https://lbssheet-my.sharepoint.com", "https://lbssheet.sharepoint.com", "https://ukc-excel.officeapps.live.com", "https://ukw-excel.officeapps.live.com", "https://excel.officeapps.live.com")
+$i = 1
+foreach ($origin in $passwordManagerBlockedOrigins) {
+    Set-TrackedValue -Path "$EdgePolicyPath\PasswordManagerBlocklist" -Name "$i" -Value $origin -Type String -Changes ([ref]$changes)
+    $i++
+}
 Set-TrackedValue -Path $EdgePolicyPath -Name "AutofillAddressEnabled" -Value 0 -Type DWord -Changes ([ref]$changes)
 Set-TrackedValue -Path $EdgePolicyPath -Name "AutofillCreditCardEnabled" -Value 0 -Type DWord -Changes ([ref]$changes)
 Set-TrackedValue -Path $EdgePolicyPath -Name "AutoImportAtFirstRun" -Value 4 -Type DWord -Changes ([ref]$changes)
@@ -340,6 +346,12 @@ Set-TrackedValue -Path $EdgePolicyPath -Name "PreventSmartScreenPromptOverride" 
 Set-TrackedValue -Path $EdgePolicyPath -Name "PreventSmartScreenPromptOverrideForFiles" -Value 1 -Type DWord -Changes ([ref]$changes)
 Set-TrackedValue -Path $EdgePolicyPath -Name "TaskManagerEndProcessEnabled" -Value 0 -Type DWord -Changes ([ref]$changes)
 Set-TrackedValue -Path $EdgePolicyPath -Name "BackgroundModeEnabled" -Value 0 -Type DWord -Changes ([ref]$changes)
+$lnaBlockedOrigins = @("https://[*.]sharepoint.com", "https://[*.]cloud.microsoft", "https://[*.]office.com", "https://onedrive.live.com")
+$i = 1
+foreach ($origin in $lnaBlockedOrigins) {
+    Set-TrackedValue -Path "$EdgePolicyPath\LocalNetworkAccessBlockedForUrls" -Name "$i" -Value $origin -Type String -Changes ([ref]$changes)
+    $i++
+}
 
 # --- Save state so -Remove can clean up precisely ---
 $state = [PSCustomObject]@{

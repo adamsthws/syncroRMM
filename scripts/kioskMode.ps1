@@ -11,8 +11,8 @@
     for the machine), it's provisioned machine-wide from the Microsoft Store
     via winget, and removed again on -Enabled false.
     Fully self-contained - writes the Assigned Access XML it needs to
-    C:\ProgramData\Kiosk\, plus the Edge shortcut Start/taskbar pinning
-    requires into the All Users Start Menu, at runtime.
+    C:\ProgramData\Kiosk\ at runtime. Edge is pinned via its stock "Microsoft
+    Edge" shortcut; its start page comes from the Edge policies below.
     Reversing (-Enabled false) deletes those files, clears the Assigned Access
     config, and removes/restores only the registry values this script itself
     touched, leaving no trace.
@@ -219,27 +219,20 @@ $MinBuild = 26200   # Windows 11 25H2
 $WorkDir  = Join-Path $env:ProgramData "Kiosk"
 $XmlPath  = Join-Path $WorkDir "AssignedAccessConfig.xml"
 $StateFile = Join-Path $WorkDir "kiosk-state.json"
-# The multi-app kiosk AllowedApps schema has no attribute for passing launch
-# arguments to a desktop app (confirmed via Microsoft-Windows-AssignedAccess/
-# Admin: both "rs5:Arguments" and unprefixed "DesktopAppArguments" are
-# rejected as undefined) - the only way to launch Edge at a specific
-# homepage/with specific flags is to point DesktopAppPath at a prebuilt
-# shortcut that already has those arguments baked in, rather than at
-# msedge.exe directly.
 # StartPins' desktopAppLink (and TaskbarLayout's DesktopApplicationLinkPath)
 # only resolve a shortcut that actually lives under a Start Menu "Programs"
-# folder - per Microsoft's own examples they're always
-# %APPDATA%\...\Start Menu\Programs\... or %ALLUSERSPROFILE%\...\Start
-# Menu\Programs\...  A shortcut anywhere else (e.g. our own WorkDir) is
-# silently ignored, which is why Edge previously had no Start tile.
-$EdgeShortcutName = "Edge-Kiosk.lnk"
+# folder, so Edge is pinned via its own stock shortcut there. The start page
+# comes from the RestoreOnStartup/Homepage policies, not launch arguments.
 $StartMenuProgramsDir = Join-Path $env:ProgramData "Microsoft\Windows\Start Menu\Programs"
-$EdgeShortcutPath = Join-Path $StartMenuProgramsDir $EdgeShortcutName
+$StockEdgeShortcutPath = Join-Path $StartMenuProgramsDir "Microsoft Edge.lnk"
+# Custom shortcut created by earlier versions of this script - removed on
+# enable/disable so upgraded machines don't keep a stale second Edge entry.
+$LegacyEdgeShortcutPath = Join-Path $StartMenuProgramsDir "Edge-Kiosk.lnk"
 # The %ALLUSERSPROFILE% env-var form (rather than the resolved path above) is
 # what's embedded in the AssignedAccess XML/JSON, matching Microsoft's
 # documented examples and staying correct even if ProgramData isn't at its
 # default location.
-$EdgeShortcutEnvPath = "%ALLUSERSPROFILE%\Microsoft\Windows\Start Menu\Programs\$EdgeShortcutName"
+$EdgeShortcutEnvPath = "%ALLUSERSPROFILE%\Microsoft\Windows\Start Menu\Programs\Microsoft Edge.lnk"
 $EdgePolicyPath = "HKLM:\SOFTWARE\Policies\Microsoft\Edge"
 $ProfileGuid = "{4c9a1e2b-6f3d-4a8e-9c2f-8b1d5e7a3c90}"
 # Package name (e.g. "ZohoCorp.44386D730E544"), as Get-AppxPackage/
@@ -629,26 +622,23 @@ function Enable-Kiosk {
     # nothing for an AUMID that isn't installed. ---
     $oneAuthInstalled = Install-OneAuth -KioskSid $kioskSid
 
-    # --- Build a dedicated Edge shortcut with the homepage/flags baked in
-    # (see the note above $EdgeShortcutPath - the CSP has no attribute for
-    # this, so a shortcut is the only way to pass launch arguments). This is
-    # only usable as the StartPins tile target, not as the AllowedApps entry
-    # itself - AllowedApps must declare the real msedge.exe path (pointing it
-    # at the .lnk instead fails later, at "Profile element validation", once
-    # the XML is schema-valid but semantically wrong) - Windows resolves a
-    # pinned shortcut's target back to an AllowedApps entry to validate it. ---
+    # --- Edge pins use the stock shortcut (see the note above
+    # $StockEdgeShortcutPath). AllowedApps must still declare the real
+    # msedge.exe path - Windows resolves a pinned shortcut's target back to an
+    # AllowedApps entry to validate it. ---
     $edgeExePath = "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
-    New-Item -Path $StartMenuProgramsDir -ItemType Directory -Force | Out-Null
-    $wshShell = New-Object -ComObject WScript.Shell
-    $edgeShortcut = $wshShell.CreateShortcut($EdgeShortcutPath)
-    $edgeShortcut.TargetPath = $edgeExePath
-    $edgeShortcut.Arguments = "$HomepageUrl --no-first-run"
-    $edgeShortcut.Save()
+    Remove-Item -Path $LegacyEdgeShortcutPath -Force -ErrorAction SilentlyContinue
+    if (-not (Test-Path $StockEdgeShortcutPath)) {
+        Write-Warning "Stock Edge shortcut not found at $StockEdgeShortcutPath - Edge will be missing from Start and the taskbar until Edge is repaired/reinstalled."
+    }
 
     # --- Write the Assigned Access XML ---
     # StartPins/TaskbarLayout are JSON/XML inside CDATA blocks, so any path
     # substituted into the JSON one needs its backslashes doubled (a lone
     # "\" is an invalid JSON escape); the XML one takes a plain backslash.
+    # Edge is allowed twice on purpose: DesktopAppPath lets msedge.exe run,
+    # but Start filters its pins by AUMID - without "MSEdge" listed too, the
+    # Start pin is silently dropped (the taskbar pin doesn't filter this way).
     $edgeShortcutPathJson = $EdgeShortcutEnvPath.Replace('\', '\\')
     $xml = @"
 <?xml version="1.0" encoding="utf-8" ?>
@@ -662,6 +652,7 @@ function Enable-Kiosk {
                 <AllowedApps>
                     <App AppUserModelId="$OneAuthAUMID" />
                     <App DesktopAppPath="$edgeExePath" />
+                    <App AppUserModelId="MSEdge" />
                 </AllowedApps>
             </AllAppsList>
             <win11:StartPins>
@@ -853,6 +844,9 @@ function Enable-Kiosk {
 
     # Declutter: sidebar/Copilot, shopping, rewards, promos, and address-bar search.
     Set-TrackedValue -Path $EdgePolicyPath -Name "HubsSidebarEnabled" -Value 0 -Type DWord -Changes ([ref]$changes)
+    # HubsSidebarEnabled doesn't cover the toolbar Copilot button Entra ID
+    # profiles get (Microsoft 365 Copilot Chat) - that has its own policy.
+    Set-TrackedValue -Path $EdgePolicyPath -Name "Microsoft365CopilotChatIconEnabled" -Value 0 -Type DWord -Changes ([ref]$changes)
     Set-TrackedValue -Path $EdgePolicyPath -Name "EdgeShoppingAssistantEnabled" -Value 0 -Type DWord -Changes ([ref]$changes)
     Set-TrackedValue -Path $EdgePolicyPath -Name "ShowMicrosoftRewards" -Value 0 -Type DWord -Changes ([ref]$changes)
     Set-TrackedValue -Path $EdgePolicyPath -Name "EdgeCollectionsEnabled" -Value 0 -Type DWord -Changes ([ref]$changes)
@@ -1043,7 +1037,7 @@ function Disable-Kiosk {
     if (-not (Test-Path $StateFile)) {
         Write-Warning "No state file found at $StateFile - nothing recorded to precisely revert. Attempting best-effort cleanup only."
         Remove-Item -Path $XmlPath -Force -ErrorAction SilentlyContinue
-        Remove-Item -Path $EdgeShortcutPath -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path $LegacyEdgeShortcutPath -Force -ErrorAction SilentlyContinue
         return
     }
     try {
@@ -1051,7 +1045,7 @@ function Disable-Kiosk {
     } catch {
         Write-Warning "State file at $StateFile is corrupt or unreadable ($($_.Exception.Message)) - nothing recorded to precisely revert. Attempting best-effort cleanup only."
         Remove-Item -Path $XmlPath -Force -ErrorAction SilentlyContinue
-        Remove-Item -Path $EdgeShortcutPath -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path $LegacyEdgeShortcutPath -Force -ErrorAction SilentlyContinue
         return
     }
 
@@ -1168,7 +1162,7 @@ function Disable-Kiosk {
 
     # --- Remove files this script created ---
     Remove-Item -Path $XmlPath -Force -ErrorAction SilentlyContinue
-    Remove-Item -Path $EdgeShortcutPath -Force -ErrorAction SilentlyContinue
+    Remove-Item -Path $LegacyEdgeShortcutPath -Force -ErrorAction SilentlyContinue
     Remove-Item -Path $StateFile -Force -ErrorAction SilentlyContinue
     if (-not $state.WorkDirPreExisted) {
         Remove-Item -Path $WorkDir -Recurse -Force -ErrorAction SilentlyContinue

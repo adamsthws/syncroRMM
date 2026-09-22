@@ -52,12 +52,9 @@
 # 64-bit OS. HKLM:\SOFTWARE\Policies\... (everything this script writes to,
 # including the Edge policy keys) is subject to WOW64 registry redirection —
 # a 32-bit process writing there is silently redirected to
-# HKLM:\SOFTWARE\WOW6432Node\..., which 64-bit Edge never reads. Some RMM
-# agents (including older Syncro agents) run scripts under a 32-bit
+# HKLM:\SOFTWARE\WOW6432Node\..., which 64-bit Edge never reads. 
+# Some RMM agents run scripts under a 32-bit
 # PowerShell host even on 64-bit Windows, so this can't be assumed away.
-# Global $enabled/$KioskUser (how Syncro passes script variables) don't carry
-# over to a relaunched child process automatically, so they're forwarded
-# explicitly alongside the original $args.
 # ===========================================================================
 if ([Environment]::Is64BitOperatingSystem -and -not [Environment]::Is64BitProcess) {
     Write-Warning "Running as a 32-bit process on a 64-bit OS — re-launching under 64-bit PowerShell so registry writes land in the real (non-WOW6432Node) hive."
@@ -324,6 +321,25 @@ if ($EnableKiosk) {
 # ===========================================================================
 # Helpers
 # ===========================================================================
+function Confirm-RegistryValue {
+    # Re-reads a value immediately after it's written and logs whether it
+    # actually stuck. This is diagnostic only — it catches something else on
+    # the machine reverting/deleting policy values the instant we write them
+    # (seen in the field: everything but the last-written value was gone by
+    # the time edge://policy was checked), which a normal try/catch around
+    # New-ItemProperty would never surface since the write itself succeeds.
+    param($Path, $Name, $ExpectedValue)
+    $actual = Get-ItemProperty -Path $Path -Name $Name -ErrorAction SilentlyContinue
+    if ($actual -and "$($actual.$Name)" -eq "$ExpectedValue") {
+        Write-Host "  [OK] $Path\$Name = $ExpectedValue"
+        return $true
+    } else {
+        $gotStr = if ($actual) { "$($actual.$Name)" } else { "<missing>" }
+        Write-Warning "  [VERIFY FAILED] $Path\$Name — expected '$ExpectedValue', found '$gotStr' immediately after writing it"
+        return $false
+    }
+}
+
 function Set-TrackedValue {
     param($Path, $Name, $Value, $Type, [ref]$Changes)
     New-Item -Path $Path -Force | Out-Null
@@ -333,8 +349,10 @@ function Set-TrackedValue {
         Name     = $Name
         Existed  = $null -ne $existing
         Previous = if ($existing) { $existing.$Name } else { $null }
+        NewValue = $Value
     }
     New-ItemProperty -Path $Path -Name $Name -Value $Value -PropertyType $Type -Force | Out-Null
+    Confirm-RegistryValue -Path $Path -Name $Name -ExpectedValue $Value | Out-Null
 }
 
 function Get-M365AllowedDomains {
@@ -570,6 +588,7 @@ function Enable-Kiosk {
     New-Item -Path "$EdgePolicyPath\URLBlocklist" -Force | Out-Null
     $urlBlocklistExisted = (Get-Item "$EdgePolicyPath\URLBlocklist" -ErrorAction SilentlyContinue).Property.Count -gt 0
     New-ItemProperty -Path "$EdgePolicyPath\URLBlocklist" -Name "1" -Value "*" -PropertyType String -Force | Out-Null
+    Confirm-RegistryValue -Path "$EdgePolicyPath\URLBlocklist" -Name "1" -ExpectedValue "*" | Out-Null
     # URLBlocklist's "*" only covers web content — internal edge:// pages
     # aren't reliably caught by it (confirmed by testing: edge://settings
     # stayed reachable), and there's no dedicated "hide Settings" policy, so
@@ -615,6 +634,12 @@ function Enable-Kiosk {
         New-ItemProperty -Path "$EdgePolicyPath\URLAllowlist" -Name "$i" -Value $domain -PropertyType String -Force | Out-Null
         $i++
     }
+    $appliedAllowlistCount = (Get-Item "$EdgePolicyPath\URLAllowlist" -ErrorAction SilentlyContinue).Property.Count
+    if ($appliedAllowlistCount -eq $domainsToApply.Count) {
+        Write-Host "  [OK] $EdgePolicyPath\URLAllowlist — $appliedAllowlistCount domains verified present immediately after write"
+    } else {
+        Write-Warning "  [VERIFY FAILED] $EdgePolicyPath\URLAllowlist — expected $($domainsToApply.Count) domains, found $appliedAllowlistCount immediately after write"
+    }
 
     Set-TrackedValue -Path $EdgePolicyPath -Name "RestoreOnStartup" -Value 4 -Type DWord -Changes ([ref]$changes)
     $restoreUrlsExisted = Test-Path "$EdgePolicyPath\RestoreOnStartupURLs"
@@ -630,6 +655,7 @@ function Enable-Kiosk {
         New-Item -Path "$EdgePolicyPath\RestoreOnStartupURLs" -Force | Out-Null
     }
     New-ItemProperty -Path "$EdgePolicyPath\RestoreOnStartupURLs" -Name "1" -Value $HomepageUrl -PropertyType String -Force | Out-Null
+    Confirm-RegistryValue -Path "$EdgePolicyPath\RestoreOnStartupURLs" -Name "1" -ExpectedValue $HomepageUrl | Out-Null
 
     Set-TrackedValue -Path $EdgePolicyPath -Name "HomepageLocation" -Value $HomepageUrl -Type String -Changes ([ref]$changes)
     Set-TrackedValue -Path $EdgePolicyPath -Name "HomepageIsNewTabPage" -Value 0 -Type DWord -Changes ([ref]$changes)
@@ -757,6 +783,32 @@ function Enable-Kiosk {
                 }
             }
         }
+    }
+
+    # --- Final re-verification pass ---
+    # Something on some machines has been observed to delete these registry
+    # values within seconds of them being written (all but the last one set
+    # were gone by the next reboot, with no Intune/GPO in play) — the
+    # per-write Confirm-RegistryValue checks above wouldn't catch that since
+    # they run immediately after each individual write. Re-reading
+    # everything once more here, after all writes are done, narrows down
+    # whether the loss happens during this run or only afterward (at
+    # reboot/logon/some later background process).
+    Write-Host "Re-checking all tracked registry values..."
+    $verifyFailures = 0
+    foreach ($change in ($changes | Where-Object { $null -ne $_.NewValue })) {
+        if (-not (Confirm-RegistryValue -Path $change.Path -Name $change.Name -ExpectedValue $change.NewValue)) {
+            $verifyFailures++
+        }
+    }
+    $finalBlocklistCount = (Get-Item "$EdgePolicyPath\URLBlocklist" -ErrorAction SilentlyContinue).Property.Count
+    $finalAllowlistCount = (Get-Item "$EdgePolicyPath\URLAllowlist" -ErrorAction SilentlyContinue).Property.Count
+    Write-Host "  URLBlocklist entries present: $finalBlocklistCount (expected $($blockedInternalPages.Count + 1))"
+    Write-Host "  URLAllowlist entries present: $finalAllowlistCount (expected $($domainsToApply.Count))"
+    if ($verifyFailures -gt 0 -or $finalBlocklistCount -ne ($blockedInternalPages.Count + 1) -or $finalAllowlistCount -ne $domainsToApply.Count) {
+        Write-Warning "$verifyFailures tracked value(s) and/or the URLBlocklist/URLAllowlist counts no longer match what was just written — something is reverting these registry values during the script run itself, not just afterward."
+    } else {
+        Write-Host "  All tracked values still present immediately after the run completed."
     }
 
     $succeeded = $true

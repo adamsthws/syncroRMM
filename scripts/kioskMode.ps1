@@ -62,9 +62,8 @@
                     With -Enabled false, the kiosk account is read from the
                     applied Assigned Access config unless -KioskUser is given.
 
-    Must run elevated (SYSTEM or local admin). The kiosk account must have
-    signed in at least once. Edit the CONFIGURATION block
-    below (OneAuth AUMID, allowed domains) before first use.
+    Must run elevated (SYSTEM or local admin). 
+    The kiosk account must have signed in at least once. 
 #>
 
 # ===========================================================================
@@ -151,7 +150,7 @@ if ([string]::IsNullOrWhiteSpace($SharePointTenant)) {
 $SharePointTenant = ("$SharePointTenant").Trim().ToLower() -replace '^https?://', '' -replace '(-my)?\.sharepoint\.com.*$', ''
 
 # ===========================================================================
-# CONFIGURATION - edit before first use
+# CONFIGURATION
 # ===========================================================================
 $OneAuthAUMID   = "ZohoCorp.44386D730E544_hfrrf6a1akhx2!App"   # Zoho OneAuth
 # Microsoft Store product ID for OneAuth (apps.microsoft.com/detail/<id>) -
@@ -312,7 +311,7 @@ $EdgePolicyValues = @(
     # first-run welcome/splash experience instead and only starts honoring
     # these policies from the second launch onward. HideFirstRunExperience
     # suppresses that splash screen so RestoreOnStartup/HomepageLocation take
-    # effect immediately, which is what testing showed was otherwise missing.
+    # effect immediately.
     @{ Name = "HideFirstRunExperience"; Value = 1 }
     @{ Name = "DeveloperToolsAvailability"; Value = 2 }
     @{ Name = "BrowserAddProfileEnabled"; Value = 0 }

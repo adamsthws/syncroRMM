@@ -20,7 +20,9 @@
     Assigned Access config, scheduled tasks, C:\ProgramData\Kiosk\, and every
     policy value it sets - returning those settings to Windows defaults. The
     kiosk account's taskbar pins are reset to the defaults too. OneAuth stays
-    installed, and the account stays a standard user.
+    installed, and the account stays a standard user. The machine-wide power
+    settings (display off after 20 min, never sleep/hibernate, Fast Startup
+    off) are also deliberately left in place.
 
     Every time -Enabled true runs (including re-runs against an
     already-kiosked machine), it tries to refresh the Microsoft 365 domain
@@ -427,6 +429,27 @@ $UserSystemPolicyNames = @("DisableTaskMgr", "DisableChangePassword")
 # AllowedApps, so it must be turned off here instead.
 $CopilotPolicyPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsCopilot"
 $CopilotPolicyName = "TurnOffWindowsCopilot"
+
+# Machine-wide power settings, applied on enable and deliberately NOT undone
+# on disable: display off after $DisplayOffMinutes of inactivity, never
+# sleep or hibernate, and Fast Startup off (so a shutdown is a real one).
+# Applied both to the active power scheme via powercfg (takes effect now)
+# and as power policy (applies to every scheme and can't be changed from
+# Settings by a standard user).
+$DisplayOffMinutes = 20
+$PowerPolicyPath = "HKLM:\SOFTWARE\Policies\Microsoft\Power\PowerSettings"
+$PowerPolicySettings = [ordered]@{
+    "3c0bc021-c8a8-4e07-a973-6b14cbcb2b7e" = $DisplayOffMinutes * 60   # Turn off the display (seconds)
+    "29f6c1db-86da-48c5-9fdb-f2b67b1f44da" = 0                         # Sleep after (0 = never)
+    "9d7815a6-7ee4-497e-8888-515a05f02364" = 0                         # Hibernate after (0 = never)
+}
+$FastStartupPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power"
+$FastStartupName = "HiberbootEnabled"
+
+# Edge is started maximized by the kiosk's own launches (AutoLaunch at
+# sign-in and the unlock task). Edge remembers the window state, so later
+# launches from the Start/taskbar pins open maximized too.
+$EdgeLaunchArguments = "--start-maximized"
 
 # ===========================================================================
 # Resolve desired state:
@@ -851,7 +874,7 @@ function Register-EdgeUnlockTasks {
     # ExecutionTimeLimit 0 = no limit; otherwise Task Scheduler kills Edge after 72h.
     $launchSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)
     Register-ScheduledTask -TaskPath $KioskTaskPath -TaskName $EdgeLaunchTaskName `
-        -Action (New-ScheduledTaskAction -Execute $EdgeExePath) `
+        -Action (New-ScheduledTaskAction -Execute $EdgeExePath -Argument $EdgeLaunchArguments) `
         -Principal $launchPrincipal -Settings $launchSettings -ErrorAction Stop | Out-Null
 
     $check = @"
@@ -981,7 +1004,7 @@ function Enable-Kiosk {
             <AllAppsList>
                 <AllowedApps>
                     <App AppUserModelId="$OneAuthAUMID" />
-                    <App DesktopAppPath="$edgeExePath" rs5:AutoLaunch="true" />
+                    <App DesktopAppPath="$edgeExePath" rs5:AutoLaunch="true" rs5:AutoLaunchArguments="$EdgeLaunchArguments" />
                     <App AppUserModelId="MSEdge" />
                 </AllowedApps>
             </AllAppsList>
@@ -1058,6 +1081,20 @@ function Enable-Kiosk {
 
     # --- Disable the Windows Copilot taskbar button (see $CopilotPolicyPath) ---
     Set-PolicyValue -Path $CopilotPolicyPath -Name $CopilotPolicyName -Value 1
+
+    # --- Power: display off after $DisplayOffMinutes min, never sleep, no
+    # Fast Startup (see $PowerPolicyPath). Not undone on disable. ---
+    foreach ($setting in "monitor-timeout-ac $DisplayOffMinutes", "monitor-timeout-dc $DisplayOffMinutes",
+                         "standby-timeout-ac 0", "standby-timeout-dc 0",
+                         "hibernate-timeout-ac 0", "hibernate-timeout-dc 0") {
+        & powercfg.exe /change @($setting -split ' ') *> $null
+        if ($LASTEXITCODE -ne 0) { Write-Warning "powercfg /change $setting failed (exit code $LASTEXITCODE) - the power policy below still applies it after a reboot." }
+    }
+    foreach ($guid in $PowerPolicySettings.Keys) {
+        Set-PolicyValue -Path "$PowerPolicyPath\$guid" -Name "ACSettingIndex" -Value $PowerPolicySettings[$guid]
+        Set-PolicyValue -Path "$PowerPolicyPath\$guid" -Name "DCSettingIndex" -Value $PowerPolicySettings[$guid]
+    }
+    Set-PolicyValue -Path $FastStartupPath -Name $FastStartupName -Value 0
 
     # --- Per-user: disable Task Manager and "Change a password" ---
     foreach ($name in $UserSystemPolicyNames) {

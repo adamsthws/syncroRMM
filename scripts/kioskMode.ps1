@@ -6,9 +6,10 @@
     both pinned to Start and the taskbar. Edge auto-launches at sign-in and,
     via two \Kiosk\ scheduled tasks, whenever the kiosk session is unlocked
     with Edge closed.
-    Also disables Task Manager and "Change a password" on the Ctrl+Alt+Del
-    screen for the kiosk account only, via that user's own registry hive -
-    no other account on the machine is affected.
+    The Edge policies, plus disabling Task Manager and "Change a password" on
+    the Ctrl+Alt+Del screen, are written to the kiosk account's own registry
+    hive (HKU\<SID>\SOFTWARE\Policies\...) - no other account on the machine
+    is affected.
     If OneAuth isn't already installed for the kiosk account (or provisioned
     for the machine), it's provisioned machine-wide from the Microsoft Store
     via winget, and removed again on -Enabled false.
@@ -17,7 +18,8 @@
     Edge" shortcut; its start page comes from the Edge policies below.
     Reversing (-Enabled false) deletes those files, clears the Assigned Access
     config, and removes/restores only the registry values this script itself
-    touched, leaving no trace.
+    touched, leaving no trace. Re-running -Enabled true keeps the first
+    run's record of the pre-kiosk machine, so this still restores it.
 
     Every time -Enabled true runs (including re-runs against an
     already-kiosked machine), it tries to refresh the Microsoft 365 domain
@@ -48,14 +50,15 @@
                       "DOMAIN\User"              - an on-prem AD account
                       "COMPUTERNAME\LocalUser"   - a local account
 
-    Must run elevated (SYSTEM or local admin). Edit the CONFIGURATION block
+    Must run elevated (SYSTEM or local admin). The kiosk account must have
+    signed in at least once. Edit the CONFIGURATION block
     below (OneAuth AUMID, homepage, allowed domains) before first use.
 #>
 
 # ===========================================================================
 # Re-launch under 64-bit PowerShell if we're running as a 32-bit process on a
-# 64-bit OS. HKLM:\SOFTWARE\Policies\... (everything this script writes to,
-# including the Edge policy keys) is subject to WOW64 registry redirection -
+# 64-bit OS. HKLM:\SOFTWARE\Policies\... (the machine-wide policy keys this
+# script writes to) is subject to WOW64 registry redirection -
 # a 32-bit process writing there is silently redirected to
 # HKLM:\SOFTWARE\WOW6432Node\..., which 64-bit Edge never reads. 
 # Some RMM agents run scripts under a 32-bit
@@ -235,7 +238,12 @@ $LegacyEdgeShortcutPath = Join-Path $StartMenuProgramsDir "Edge-Kiosk.lnk"
 # documented examples and staying correct even if ProgramData isn't at its
 # default location.
 $EdgeShortcutEnvPath = "%ALLUSERSPROFILE%\Microsoft\Windows\Start Menu\Programs\Microsoft Edge.lnk"
-$EdgePolicyPath = "HKLM:\SOFTWARE\Policies\Microsoft\Edge"
+# Edge policies go under the kiosk account's hive (HKU\<SID>\<this subkey>),
+# not HKLM - Edge reads both, and this scopes them to that account alone.
+$EdgePolicySubKey = "SOFTWARE\Policies\Microsoft\Edge"
+# Where earlier versions of this script wrote them, machine-wide - reverted
+# on the next enable/disable (see Remove-LegacyMachineEdgePolicies).
+$LegacyEdgePolicyPath = "HKLM:\$EdgePolicySubKey"
 # Scheduled tasks that relaunch Edge when the kiosk session is unlocked (see
 # Register-EdgeUnlockTasks). Assigned Access's AutoLaunch covers sign-in only.
 $KioskTaskPath = "\Kiosk\"
@@ -362,6 +370,102 @@ function Set-TrackedValue {
     Confirm-RegistryValue -Path $Path -Name $Name -ExpectedValue $Value | Out-Null
 }
 
+function Undo-TrackedValue {
+    # Reverts one Set-TrackedValue change recorded in the state file.
+    param($Change)
+    if ($Change.Existed) {
+        Set-ItemProperty -Path $Change.Path -Name $Change.Name -Value $Change.Previous -Force -ErrorAction SilentlyContinue
+    } else {
+        Remove-ItemProperty -Path $Change.Path -Name $Change.Name -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Remove-EdgePolicyListKeys {
+    # Removes the list-style Edge policy keys Enable-Kiosk created under
+    # $PolicyPath (or just its URLBlocklist "1" entry, if that key pre-existed).
+    param($State, [string]$PolicyPath)
+    if (-not $State.UrlBlocklistKeyPreExisted) {
+        Remove-Item -Path "$PolicyPath\URLBlocklist" -Recurse -Force -ErrorAction SilentlyContinue
+    } else {
+        Remove-ItemProperty -Path "$PolicyPath\URLBlocklist" -Name "1" -Force -ErrorAction SilentlyContinue
+    }
+    if (-not $State.UrlAllowlistKeyPreExisted) {
+        Remove-Item -Path "$PolicyPath\URLAllowlist" -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    if (-not $State.RestoreUrlsKeyPreExisted) {
+        Remove-Item -Path "$PolicyPath\RestoreOnStartupURLs" -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Get-PriorKioskState {
+    # Reads the state file left by an earlier enable (kiosk mode is already
+    # on), or returns $null if there isn't one. A re-run must keep that
+    # file's record of the pre-kiosk machine, since by now the registry and
+    # Assigned Access hold the kiosk's own settings.
+    if (-not (Test-Path $StateFile)) { return $null }
+    try {
+        $prior = Get-Content -Path $StateFile -Raw | ConvertFrom-Json
+    } catch {
+        Write-Warning "State file at $StateFile is unreadable ($($_.Exception.Message)) - treating this as a first run."
+        return $null
+    }
+    # Earlier versions (no EdgePolicyPath) rewrote the state file on every
+    # run, so after a re-run a value's "previous" is the kiosk's own. Treat
+    # those as not having existed, so disable removes rather than restores
+    # them.
+    if (-not $prior.EdgePolicyPath) {
+        foreach ($change in @($prior.RegistryChanges)) {
+            if ($change -and $change.Existed -and "$($change.Previous)" -eq "$($change.NewValue)") {
+                $change.Existed = $false
+                $change.Previous = $null
+            }
+        }
+    }
+    return $prior
+}
+
+function Merge-TrackedChanges {
+    # Combines the prior run's tracked changes with this run's: where both
+    # touched a value, the prior run's Existed/Previous (the pre-kiosk value)
+    # is kept with this run's NewValue. Values only the prior run touched are
+    # kept too, so disable still reverts them.
+    param($Prior, $Current)
+    $merged = [ordered]@{}
+    foreach ($change in (@($Prior) + @($Current))) {
+        if (-not $change) { continue }
+        $key = "$($change.Path)|$($change.Name)"
+        if ($merged.Contains($key)) {
+            $merged[$key].NewValue = $change.NewValue
+        } else {
+            $merged[$key] = [PSCustomObject]@{
+                Path     = $change.Path
+                Name     = $change.Name
+                Existed  = $change.Existed
+                Previous = $change.Previous
+                NewValue = $change.NewValue
+            }
+        }
+    }
+    return @($merged.Values)
+}
+
+function Remove-LegacyMachineEdgePolicies {
+    # Earlier versions of this script wrote the Edge policies machine-wide
+    # (HKLM), locking Edge down for every account. When enabling over one of
+    # those runs, revert them from its state first so the lockdown ends up
+    # on the kiosk account only. A state with EdgePolicyPath set was written
+    # by a per-user run and has nothing in HKLM to revert.
+    param($PriorState)
+    if (-not $PriorState -or $PriorState.EdgePolicyPath) { return }
+    $legacyChanges = @($PriorState.RegistryChanges | Where-Object { $_ -and $_.Path -like "$LegacyEdgePolicyPath*" })
+    if ($legacyChanges.Count -eq 0) { return }
+    Write-Host "Removing the machine-wide Edge policies written by an earlier version of this script..."
+    foreach ($change in $legacyChanges) {
+        Undo-TrackedValue -Change $change
+    }
+    Remove-EdgePolicyListKeys -State $PriorState -PolicyPath $LegacyEdgePolicyPath
+}
+
 function Get-M365AllowedDomains {
     # Fetches Microsoft's official Worldwide M365 endpoint list and returns
     # every domain served over HTTPS (443) - i.e. the set relevant to a
@@ -428,8 +532,9 @@ function ConvertTo-EdgeUrlPatterns {
 function Get-CurrentAllowlistDomains {
     # Reads back whatever domains are already applied in the Edge
     # URLAllowlist registry key, in their existing numeric order.
-    if (-not (Test-Path "$EdgePolicyPath\URLAllowlist")) { return @() }
-    $props = Get-ItemProperty -Path "$EdgePolicyPath\URLAllowlist" -ErrorAction SilentlyContinue
+    param([string]$PolicyPath)
+    if (-not (Test-Path "$PolicyPath\URLAllowlist")) { return @() }
+    $props = Get-ItemProperty -Path "$PolicyPath\URLAllowlist" -ErrorAction SilentlyContinue
     if (-not $props) { return @() }
     return @(
         $props.PSObject.Properties |
@@ -633,7 +738,10 @@ function Unregister-EdgeUnlockTasks {
 
 function Enable-Kiosk {
     Write-Host "Enabling kiosk configuration..."
-    $workDirPreExisted = Test-Path $WorkDir
+    # Set if kiosk mode is already enabled: its record of the pre-kiosk
+    # machine is carried into this run's state file, not replaced by it.
+    $priorState = Get-PriorKioskState
+    $workDirPreExisted = if ($priorState) { [bool]$priorState.WorkDirPreExisted } else { Test-Path $WorkDir }
     New-Item -Path $WorkDir -ItemType Directory -Force | Out-Null
 
     # Populated as changes are made below. Saved in the `finally` block so
@@ -642,13 +750,14 @@ function Enable-Kiosk {
     # but leave nothing to revert them, since the state file used to only be
     # written after everything succeeded.
     $changes = @()
+    $priorChanges = if ($priorState) { @($priorState.RegistryChanges | Where-Object { $_ }) } else { @() }
     $previousAssignedAccessConfig = $null
     $urlBlocklistExisted = $false
     $urlAllowlistExisted = $false
     $restoreUrlsExisted = $false
     $perUserHiveState = $null
-    $demotedFromAdmin = $null
-    $oneAuthInstalled = $null
+    $demotedFromAdmin = if ($priorState) { $priorState.DemotedFromAdmin } else { $null }
+    $oneAuthInstalled = if ($priorState) { $priorState.OneAuthInstalled } else { $null }
 
     function Save-KioskState {
         $state = [PSCustomObject]@{
@@ -658,13 +767,65 @@ function Enable-Kiosk {
             UrlBlocklistKeyPreExisted     = $urlBlocklistExisted
             UrlAllowlistKeyPreExisted     = $urlAllowlistExisted
             RestoreUrlsKeyPreExisted      = $restoreUrlsExisted
-            RegistryChanges               = $changes
+            RegistryChanges               = Merge-TrackedChanges -Prior $priorChanges -Current $changes
             PerUserHive                   = $perUserHiveState
             DemotedFromAdmin              = $demotedFromAdmin
             OneAuthInstalled              = $oneAuthInstalled
+            EdgePolicyPath                = $EdgePolicyPath
         }
         $state | ConvertTo-Json -Depth 5 | Set-Content -Path $StateFile -Encoding UTF8
     }
+
+    # --- Resolve the kiosk account's SID and load its registry hive up
+    # front: every Edge policy and the Task Manager lockdown are written
+    # there, so they apply to that account only. Without the hive the kiosk
+    # would get an unrestricted Edge, so bail out here - before anything is
+    # changed or the state file is overwritten - rather than carry on. ---
+    $kioskSid = Resolve-KioskUserSid -KioskUser $KioskUser
+    if (-not $kioskSid) {
+        Write-Error "Could not resolve a SID for '$KioskUser' - its registry hive is needed for the Edge policies. Nothing was changed."
+        exit 1
+    }
+    # The state file can only revert one kiosk account's hive.
+    $priorSid = if ($priorState -and $priorState.PerUserHive) { $priorState.PerUserHive.Sid } else { $null }
+    if ($priorSid -and $priorSid -ne $kioskSid) {
+        Write-Error "Kiosk mode is already enabled for a different account (SID $priorSid). Run '.\kioskMode.ps1 -Enabled false' first, then re-run. Nothing was changed."
+        exit 1
+    }
+    $profilePath = (Get-CimInstance -ClassName Win32_UserProfile -Filter "SID='$kioskSid'" -ErrorAction SilentlyContinue).LocalPath
+    $hiveRoot = "Registry::HKEY_USERS\$kioskSid"
+    $loadedHere = $false
+    if (-not (Test-Path $hiveRoot)) {
+        $ntUserDat = if ($profilePath) { Join-Path $profilePath "NTUSER.DAT" } else { $null }
+        if (-not ($ntUserDat -and (Test-Path $ntUserDat))) {
+            Write-Error "Could not find a profile (NTUSER.DAT) for '$KioskUser' - sign in as that account once so Windows creates it, then re-run. Nothing was changed."
+            exit 1
+        }
+        & reg.exe load "HKU\$kioskSid" $ntUserDat *> $null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Error "Failed to load the registry hive for '$KioskUser'. Nothing was changed."
+            exit 1
+        }
+        $loadedHere = $true
+    }
+    # On a re-run, the prior run's taskbar backups hold the account's
+    # pre-kiosk pins - keep pointing at them (see the taskbar step below).
+    # Earlier versions only recorded PerUserHive once that step had run.
+    $priorHive = if ($priorSid -and ($priorState.PerUserHive.TaskbarCleared -or -not $priorState.EdgePolicyPath)) { $priorState.PerUserHive } else { $null }
+    $perUserHiveState = [PSCustomObject]@{
+        Sid                    = $kioskSid
+        LoadedHere             = $loadedHere
+        TaskbandKeyExisted     = if ($priorHive) { [bool]$priorHive.TaskbandKeyExisted } else { $false }
+        TaskbandBackupFile     = if ($priorHive) { $priorHive.TaskbandBackupFile } else { $null }
+        PinnedTaskbarDir       = if ($priorHive) { $priorHive.PinnedTaskbarDir } else { $null }
+        PinnedTaskbarExisted   = if ($priorHive) { [bool]$priorHive.PinnedTaskbarExisted } else { $false }
+        PinnedTaskbarBackupDir = if ($priorHive) { $priorHive.PinnedTaskbarBackupDir } else { $null }
+        TaskbarCleared         = [bool]$priorHive
+    }
+    $EdgePolicyPath = "$hiveRoot\$EdgePolicySubKey"
+    # The prior run's "did this list key exist before" flags only apply if
+    # it wrote to the same place (not the HKLM path of an earlier version).
+    $carryEdgeListState = $priorState -and $priorState.EdgePolicyPath -eq $EdgePolicyPath
 
     $succeeded = $false
     try {
@@ -677,31 +838,38 @@ function Enable-Kiosk {
     } catch {
         throw "Could not access the Assigned Access (MDM_AssignedAccess) WMI class - this Windows edition/SKU likely doesn't support multi-app kiosk mode. $($_.Exception.Message)"
     }
-    $previousAssignedAccessConfig = $aaObj.Configuration
+    # On a re-run, the live config is the kiosk's own - keep the prior run's.
+    # Either way, never record this script's own profile as the "previous"
+    # config, or disable would put the kiosk straight back.
+    $previousAssignedAccessConfig = if ($priorState) { $priorState.PreviousAssignedAccessConfig } else { $aaObj.Configuration }
+    if ("$previousAssignedAccessConfig".Contains($ProfileGuid)) { $previousAssignedAccessConfig = $null }
 
-    # --- Resolve the kiosk account's SID up front (also used for the
-    # per-user Task Manager lockdown below), and demote it out of
-    # Administrators if it's currently a member: Assigned Access refuses to
-    # configure an admin account and Windows surfaces that refusal as an
-    # opaque "general error" from Set-CimInstance below rather than a clear
-    # message, so this has to happen before that call, not after it fails.
-    $kioskSid = Resolve-KioskUserSid -KioskUser $KioskUser
-    if ($kioskSid) {
-        $isAdmin = [bool](Get-LocalGroupMember -Group "Administrators" -ErrorAction SilentlyContinue |
-            Where-Object { $_.SID.Value -eq $kioskSid })
-        if ($isAdmin) {
-            Write-Host "'$KioskUser' is a local administrator - Assigned Access requires a standard account, so removing it from Administrators."
-            Remove-LocalGroupMember -Group "Administrators" -Member $kioskSid
-            $demotedFromAdmin = [PSCustomObject]@{ Sid = $kioskSid; WasAdmin = $true }
-        }
-    } else {
-        Write-Warning "Could not resolve a SID for '$KioskUser' - cannot verify it isn't a local administrator (Assigned Access will fail with an opaque error if it is)."
+    # --- Revert machine-wide Edge policies from an earlier version of this
+    # script, and drop them from the carried-over record ---
+    Remove-LegacyMachineEdgePolicies -PriorState $priorState
+    if ($priorState -and -not $priorState.EdgePolicyPath) {
+        $priorChanges = @($priorChanges | Where-Object { $_.Path -notlike "$LegacyEdgePolicyPath*" })
+    }
+
+    # --- Demote the kiosk account out of Administrators if it's currently a
+    # member: Assigned Access refuses to configure an admin account and
+    # Windows surfaces that refusal as an opaque "general error" from
+    # Set-CimInstance below rather than a clear message, so this has to
+    # happen before that call, not after it fails.
+    $isAdmin = [bool](Get-LocalGroupMember -Group "Administrators" -ErrorAction SilentlyContinue |
+        Where-Object { $_.SID.Value -eq $kioskSid })
+    if ($isAdmin) {
+        Write-Host "'$KioskUser' is a local administrator - Assigned Access requires a standard account, so removing it from Administrators."
+        Remove-LocalGroupMember -Group "Administrators" -Member $kioskSid
+        $demotedFromAdmin = [PSCustomObject]@{ Sid = $kioskSid; WasAdmin = $true }
     }
 
     # --- Make sure OneAuth (the kiosk's packaged app) is available to the
     # kiosk account - Assigned Access doesn't install apps, it just shows
     # nothing for an AUMID that isn't installed. ---
-    $oneAuthInstalled = Install-OneAuth -KioskSid $kioskSid
+    # (Keep the prior run's record if this run found it already installed.)
+    $oneAuthInstalledNow = Install-OneAuth -KioskSid $kioskSid
+    if ($oneAuthInstalledNow) { $oneAuthInstalled = $oneAuthInstalledNow }
 
     # --- Edge pins use the stock shortcut (see the note above
     # $StockEdgeShortcutPath). AllowedApps must still declare the real
@@ -782,8 +950,8 @@ function Enable-Kiosk {
     $aaObj.Configuration = [System.Web.HttpUtility]::HtmlEncode((Get-Content -Path $XmlPath -Raw))
     Set-CimInstance -CimInstance $aaObj
 
-    # --- Edge policy (registry), tracking every value touched ---
-    $urlBlocklistExisted = (Get-Item "$EdgePolicyPath\URLBlocklist" -ErrorAction SilentlyContinue).Property.Count -gt 0
+    # --- Edge policy (kiosk account's hive), tracking every value touched ---
+    $urlBlocklistExisted = if ($carryEdgeListState) { [bool]$priorState.UrlBlocklistKeyPreExisted } else { (Get-Item "$EdgePolicyPath\URLBlocklist" -ErrorAction SilentlyContinue).Property.Count -gt 0 }
     if (-not (Test-Path "$EdgePolicyPath\URLBlocklist")) { New-Item -Path "$EdgePolicyPath\URLBlocklist" -Force | Out-Null }
     New-ItemProperty -Path "$EdgePolicyPath\URLBlocklist" -Name "1" -Value "*" -PropertyType String -Force | Out-Null
     Confirm-RegistryValue -Path "$EdgePolicyPath\URLBlocklist" -Name "1" -ExpectedValue "*" | Out-Null
@@ -807,7 +975,7 @@ function Enable-Kiosk {
     }
 
     # --- Refresh the Microsoft 365 domain allowlist ---
-    $existingDomains = Get-CurrentAllowlistDomains
+    $existingDomains = Get-CurrentAllowlistDomains -PolicyPath $EdgePolicyPath
     $fetchedDomains = Get-M365AllowedDomains
     if ($fetchedDomains -and (Test-M365AllowedDomains -Domains $fetchedDomains)) {
         Write-Host "Refreshed Microsoft 365 domain allowlist from Microsoft ($($fetchedDomains.Count) domains)."
@@ -821,8 +989,8 @@ function Enable-Kiosk {
     }
     $domainsToApply = ConvertTo-EdgeUrlPatterns -Domains $domainsToApply
 
-    $urlAllowlistExisted = Test-Path "$EdgePolicyPath\URLAllowlist"
-    if ($urlAllowlistExisted) {
+    $urlAllowlistExisted = if ($carryEdgeListState) { [bool]$priorState.UrlAllowlistKeyPreExisted } else { Test-Path "$EdgePolicyPath\URLAllowlist" }
+    if (Test-Path "$EdgePolicyPath\URLAllowlist") {
         Get-Item "$EdgePolicyPath\URLAllowlist" | Select-Object -ExpandProperty Property | ForEach-Object {
             Remove-ItemProperty -Path "$EdgePolicyPath\URLAllowlist" -Name $_ -Force -ErrorAction SilentlyContinue
         }
@@ -845,8 +1013,8 @@ function Enable-Kiosk {
     # No "Restore pages?" prompt after an unclean shutdown - always land on
     # the start page instead.
     Set-TrackedValue -Path $EdgePolicyPath -Name "HideRestoreDialogEnabled" -Value 1 -Type DWord -Changes ([ref]$changes)
-    $restoreUrlsExisted = Test-Path "$EdgePolicyPath\RestoreOnStartupURLs"
-    if ($restoreUrlsExisted) {
+    $restoreUrlsExisted = if ($carryEdgeListState) { [bool]$priorState.RestoreUrlsKeyPreExisted } else { Test-Path "$EdgePolicyPath\RestoreOnStartupURLs" }
+    if (Test-Path "$EdgePolicyPath\RestoreOnStartupURLs") {
         # Clear any pre-existing entries first (e.g. leftover "2", "3", ...
         # from a prior run with a different/longer URL list) - otherwise
         # they'd survive alongside our "1" below and Edge would restore
@@ -866,7 +1034,6 @@ function Enable-Kiosk {
     # (Ctrl+T, new windows) are a separate policy surface and would otherwise
     # open Edge's default New Tab page instead of the M365 start page.
     Set-TrackedValue -Path $EdgePolicyPath -Name "NewTabPageLocation" -Value $HomepageUrl -Type String -Changes ([ref]$changes)
-    Set-TrackedValue -Path $EdgePolicyPath -Name "NewTabPageOverrideEnabled" -Value 1 -Type DWord -Changes ([ref]$changes)
     # Shows the Home button on the toolbar, pointed at HomepageLocation -
     # off by default in Edge, and the kiosk has no other easy way back to
     # the M365 start page from deep inside a site.
@@ -879,14 +1046,11 @@ function Enable-Kiosk {
     # suppresses that splash screen so RestoreOnStartup/HomepageLocation take
     # effect immediately, which is what testing showed was otherwise missing.
     Set-TrackedValue -Path $EdgePolicyPath -Name "HideFirstRunExperience" -Value 1 -Type DWord -Changes ([ref]$changes)
-    Set-TrackedValue -Path $EdgePolicyPath -Name "ExtensionInstallBlocklist" -Value "*" -Type String -Changes ([ref]$changes)
-    # Belt-and-suspenders alongside ExtensionInstallBlocklist="*" above:
-    # that policy blocks the install itself, while this one hides the
-    # "Extensions" entry point (toolbar puzzle-piece icon and edge://extensions
-    # UI) so there's no visible path to attempt adding one in the first place.
-    Set-TrackedValue -Path $EdgePolicyPath -Name "HideExtensionsMenu" -Value 1 -Type DWord -Changes ([ref]$changes)
+    # A list policy, like URLBlocklist - a subkey of numbered entries, not a
+    # single value on the Edge key (which Edge ignores).
+    Set-TrackedValue -Path "$EdgePolicyPath\ExtensionInstallBlocklist" -Name "1" -Value "*" -Type String -Changes ([ref]$changes)
     Set-TrackedValue -Path $EdgePolicyPath -Name "DeveloperToolsAvailability" -Value 2 -Type DWord -Changes ([ref]$changes)
-    Set-TrackedValue -Path $EdgePolicyPath -Name "BrowserAddPersonEnabled" -Value 0 -Type DWord -Changes ([ref]$changes)
+    Set-TrackedValue -Path $EdgePolicyPath -Name "BrowserAddProfileEnabled" -Value 0 -Type DWord -Changes ([ref]$changes)
     Set-TrackedValue -Path $EdgePolicyPath -Name "BrowserGuestModeEnabled" -Value 0 -Type DWord -Changes ([ref]$changes)
     Set-TrackedValue -Path $EdgePolicyPath -Name "EditFavoritesEnabled" -Value 0 -Type DWord -Changes ([ref]$changes)
     # No favorites or history for a shared account: hide the favorites bar and
@@ -979,88 +1143,51 @@ function Enable-Kiosk {
 
     # --- Per-user: disable Task Manager, scoped only to the kiosk account ---
     # (HKU\<their SID>, not the machine-wide HKLM policy - no other user is affected)
-    # ($kioskSid was already resolved above, for the admin-demotion check)
-    if (-not $kioskSid) {
-        Write-Warning "Could not resolve a SID for '$KioskUser' - skipping the per-user Task Manager lockdown (rest of kiosk setup still applied)."
-    } else {
-        $profilePath = (Get-CimInstance -ClassName Win32_UserProfile -Filter "SID='$kioskSid'" -ErrorAction SilentlyContinue).LocalPath
-        $hiveRoot = "Registry::HKEY_USERS\$kioskSid"
-        $hiveWasLoaded = Test-Path $hiveRoot
-        $loadedHere = $false
-        if (-not $hiveWasLoaded) {
-            $ntUserDat = if ($profilePath) { Join-Path $profilePath "NTUSER.DAT" } else { $null }
-            if ($ntUserDat -and (Test-Path $ntUserDat)) {
-                & reg.exe load "HKU\$kioskSid" $ntUserDat *> $null
-                if ($LASTEXITCODE -eq 0) {
-                    $loadedHere = $true
-                } else {
-                    Write-Warning "Failed to load the registry hive for $KioskUser - skipping the per-user Task Manager lockdown."
-                }
-            } else {
-                Write-Warning "Could not find a profile (NTUSER.DAT) for $KioskUser - skipping the per-user Task Manager lockdown."
-            }
-        }
-        if ($hiveWasLoaded -or $loadedHere) {
-            $perUserPolicyPath = "$hiveRoot\Software\Microsoft\Windows\CurrentVersion\Policies\System"
-            Set-TrackedValue -Path $perUserPolicyPath -Name "DisableTaskMgr" -Value 1 -Type DWord -Changes ([ref]$changes)
-            Set-TrackedValue -Path $perUserPolicyPath -Name "DisableChangePassword" -Value 1 -Type DWord -Changes ([ref]$changes)
+    $perUserPolicyPath = "$hiveRoot\Software\Microsoft\Windows\CurrentVersion\Policies\System"
+    Set-TrackedValue -Path $perUserPolicyPath -Name "DisableTaskMgr" -Value 1 -Type DWord -Changes ([ref]$changes)
+    Set-TrackedValue -Path $perUserPolicyPath -Name "DisableChangePassword" -Value 1 -Type DWord -Changes ([ref]$changes)
 
-            # --- Clear any taskbar pins left over from before kiosk mode ---
-            # Windows only fully re-applies an Assigned Access TaskbarLayout
-            # pin list on a profile's first-ever sign-in. On an account that
-            # already used the desktop normally, its previously-pinned Edge
-            # icon (plain, no baked-in homepage) survives alongside the new
-            # kiosk shortcut pin, producing two Edge icons on the taskbar.
-            # Both the Taskband registry key (pin order/metadata) and the
-            # Quick Launch "User Pinned\TaskBar" folder (the actual pinned
-            # .lnk files) are backed up here - not deleted - so Disable-Kiosk
-            # can put the account's original taskbar back exactly.
-            $taskbandKeyPath = "$hiveRoot\Software\Microsoft\Windows\CurrentVersion\Explorer\Taskband"
-            $taskbandKeyExisted = Test-Path $taskbandKeyPath
-            $taskbandBackupFile = Join-Path $WorkDir "TaskbandBackup-$kioskSid.reg"
-            if ($taskbandKeyExisted) {
-                & reg.exe export "HKU\$kioskSid\Software\Microsoft\Windows\CurrentVersion\Explorer\Taskband" $taskbandBackupFile /y *> $null
-                Remove-Item -Path $taskbandKeyPath -Recurse -Force -ErrorAction SilentlyContinue
-            }
-            $pinnedTaskbarDir = if ($profilePath) { Join-Path $profilePath "AppData\Roaming\Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar" } else { $null }
-            $pinnedTaskbarBackupDir = Join-Path $WorkDir "TaskbarPinsBackup-$kioskSid"
-            $pinnedTaskbarExisted = [bool]($pinnedTaskbarDir -and (Test-Path $pinnedTaskbarDir))
-            if ($pinnedTaskbarExisted) {
-                Remove-Item -Path $pinnedTaskbarBackupDir -Recurse -Force -ErrorAction SilentlyContinue
-                Move-Item -Path $pinnedTaskbarDir -Destination $pinnedTaskbarBackupDir -Force
-            }
-
-            $perUserHiveState = [PSCustomObject]@{
-                Sid                    = $kioskSid
-                LoadedHere             = $loadedHere
-                TaskbandKeyExisted     = $taskbandKeyExisted
-                TaskbandBackupFile     = if ($taskbandKeyExisted) { $taskbandBackupFile } else { $null }
-                PinnedTaskbarDir       = $pinnedTaskbarDir
-                PinnedTaskbarExisted   = $pinnedTaskbarExisted
-                PinnedTaskbarBackupDir = if ($pinnedTaskbarExisted) { $pinnedTaskbarBackupDir } else { $null }
-            }
-            if ($loadedHere) {
-                [gc]::Collect()
-                [gc]::WaitForPendingFinalizers()
-                & reg.exe unload "HKU\$kioskSid" *> $null
-                if ($LASTEXITCODE -ne 0) {
-                    Write-Warning "Failed to unload the registry hive for $KioskUser after editing it - it may remain loaded until reboot, which can block that user from signing in."
-                }
-            }
+    # --- Clear any taskbar pins left over from before kiosk mode ---
+    # Windows only fully re-applies an Assigned Access TaskbarLayout pin list
+    # on a profile's first-ever sign-in. On an account that already used the
+    # desktop normally, its previously-pinned Edge icon (plain, no baked-in
+    # homepage) survives alongside the new kiosk shortcut pin, producing two
+    # Edge icons on the taskbar. Both the Taskband registry key (pin
+    # order/metadata) and the Quick Launch "User Pinned\TaskBar" folder (the
+    # actual pinned .lnk files) are backed up here - not deleted - so
+    # Disable-Kiosk can put the account's original taskbar back exactly.
+    # Skipped on a re-run: the pins there now are the kiosk's own, and
+    # backing them up would overwrite the pre-kiosk backup.
+    if (-not $priorHive) {
+        $taskbandKeyPath = "$hiveRoot\Software\Microsoft\Windows\CurrentVersion\Explorer\Taskband"
+        $taskbandKeyExisted = Test-Path $taskbandKeyPath
+        $taskbandBackupFile = Join-Path $WorkDir "TaskbandBackup-$kioskSid.reg"
+        if ($taskbandKeyExisted) {
+            & reg.exe export "HKU\$kioskSid\Software\Microsoft\Windows\CurrentVersion\Explorer\Taskband" $taskbandBackupFile /y *> $null
+            Remove-Item -Path $taskbandKeyPath -Recurse -Force -ErrorAction SilentlyContinue
         }
+        $pinnedTaskbarDir = if ($profilePath) { Join-Path $profilePath "AppData\Roaming\Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar" } else { $null }
+        $pinnedTaskbarBackupDir = Join-Path $WorkDir "TaskbarPinsBackup-$kioskSid"
+        $pinnedTaskbarExisted = [bool]($pinnedTaskbarDir -and (Test-Path $pinnedTaskbarDir))
+        if ($pinnedTaskbarExisted) {
+            Remove-Item -Path $pinnedTaskbarBackupDir -Recurse -Force -ErrorAction SilentlyContinue
+            Move-Item -Path $pinnedTaskbarDir -Destination $pinnedTaskbarBackupDir -Force
+        }
+        $perUserHiveState.TaskbandKeyExisted     = $taskbandKeyExisted
+        $perUserHiveState.TaskbandBackupFile     = if ($taskbandKeyExisted) { $taskbandBackupFile } else { $null }
+        $perUserHiveState.PinnedTaskbarDir       = $pinnedTaskbarDir
+        $perUserHiveState.PinnedTaskbarExisted   = $pinnedTaskbarExisted
+        $perUserHiveState.PinnedTaskbarBackupDir = if ($pinnedTaskbarExisted) { $pinnedTaskbarBackupDir } else { $null }
+        $perUserHiveState.TaskbarCleared         = $true
     }
 
     # --- Relaunch Edge on unlock (sign-in is covered by AutoLaunch in the XML) ---
-    if ($kioskSid) {
-        try {
-            $taskAccount = Resolve-KioskTaskAccount -KioskUser $KioskUser -KioskSid $kioskSid
-            Register-EdgeUnlockTasks -KioskSid $kioskSid -TaskAccount $taskAccount -EdgeExePath $edgeExePath
-            Write-Host "  [OK] Scheduled tasks $KioskTaskPath$UnlockWatchTaskName / $EdgeLaunchTaskName registered for $taskAccount (Edge relaunches on unlock)."
-        } catch {
-            Write-Warning "Could not register the Edge-on-unlock scheduled tasks ($($_.Exception.Message)) - Edge will still auto-launch at sign-in, but not on unlock."
-        }
-    } else {
-        Write-Warning "No SID for '$KioskUser' - skipping the Edge-on-unlock scheduled tasks."
+    try {
+        $taskAccount = Resolve-KioskTaskAccount -KioskUser $KioskUser -KioskSid $kioskSid
+        Register-EdgeUnlockTasks -KioskSid $kioskSid -TaskAccount $taskAccount -EdgeExePath $edgeExePath
+        Write-Host "  [OK] Scheduled tasks $KioskTaskPath$UnlockWatchTaskName / $EdgeLaunchTaskName registered for $taskAccount (Edge relaunches on unlock)."
+    } catch {
+        Write-Warning "Could not register the Edge-on-unlock scheduled tasks ($($_.Exception.Message)) - Edge will still auto-launch at sign-in, but not on unlock."
     }
 
     # --- Final re-verification pass ---
@@ -1074,16 +1201,9 @@ function Enable-Kiosk {
     # reboot/logon/some later background process).
     Write-Host "Re-checking all tracked registry values..."
     $verifyFailures = 0
+    # (The kiosk account's hive is still loaded here - it's only unloaded in
+    # the finally block below - so per-user values can be re-read too.)
     foreach ($change in ($changes | Where-Object { $null -ne $_.NewValue })) {
-        # Per-user values live in the kiosk account's hive, which this script
-        # unloads again above if it had to load it (user not signed in) -
-        # they can't be re-read once it's gone, and were already verified at
-        # write time.
-        if ($perUserHiveState -and
-            $change.Path -like "Registry::HKEY_USERS\$($perUserHiveState.Sid)\*" -and
-            -not (Test-Path "Registry::HKEY_USERS\$($perUserHiveState.Sid)")) {
-            continue
-        }
         if (-not (Confirm-RegistryValue -Path $change.Path -Name $change.Name -ExpectedValue $change.NewValue)) {
             $verifyFailures++
         }
@@ -1126,6 +1246,14 @@ function Enable-Kiosk {
 
         Write-Error "Enable-Kiosk failed partway through, at line $($_.InvocationInfo.ScriptLineNumber) ($($_.InvocationInfo.Line.Trim())): $detail"
     } finally {
+        if ($loadedHere) {
+            [gc]::Collect()
+            [gc]::WaitForPendingFinalizers()
+            & reg.exe unload "HKU\$kioskSid" *> $null
+            if ($LASTEXITCODE -ne 0) {
+                Write-Warning "Failed to unload the registry hive for $KioskUser after editing it - it may remain loaded until reboot, which can block that user from signing in."
+            }
+        }
         # Always persist whatever changes were made, even on failure, so
         # -Enabled false can cleanly revert a partial run instead of finding
         # no state file and only being able to do best-effort cleanup.
@@ -1205,7 +1333,11 @@ function Disable-Kiosk {
         }
     }
 
-    # --- Reload the kiosk user's hive if needed, so its Task Manager value can be restored ---
+    # Where this run's Edge policies were written: the kiosk account's hive,
+    # or HKLM for a state file from an earlier (machine-wide) version.
+    $EdgePolicyPath = if ($state.EdgePolicyPath) { $state.EdgePolicyPath } else { $LegacyEdgePolicyPath }
+
+    # --- Reload the kiosk user's hive if needed, so its Edge policies and Task Manager values can be restored ---
     $perUserHiveReloadedHere = $false
     if ($state.PerUserHive -and $state.PerUserHive.Sid) {
         $hiveRoot = "Registry::HKEY_USERS\$($state.PerUserHive.Sid)"
@@ -1217,10 +1349,10 @@ function Disable-Kiosk {
                 if ($LASTEXITCODE -eq 0) {
                     $perUserHiveReloadedHere = $true
                 } else {
-                    Write-Warning "Failed to reload the kiosk user's registry hive - their Task Manager value may not be restored."
+                    Write-Warning "Failed to reload the kiosk user's registry hive - their Edge policies and Task Manager values may not be restored."
                 }
             } else {
-                Write-Warning "Could not find the kiosk user's profile - their Task Manager value may not be restored."
+                Write-Warning "Could not find the kiosk user's profile - their Edge policies and Task Manager values may not be restored."
             }
         }
     }
@@ -1241,12 +1373,11 @@ function Disable-Kiosk {
 
     # --- Revert each tracked registry value ---
     foreach ($change in $state.RegistryChanges) {
-        if ($change.Existed) {
-            Set-ItemProperty -Path $change.Path -Name $change.Name -Value $change.Previous -Force -ErrorAction SilentlyContinue
-        } else {
-            Remove-ItemProperty -Path $change.Path -Name $change.Name -Force -ErrorAction SilentlyContinue
-        }
+        Undo-TrackedValue -Change $change
     }
+
+    # --- Remove list-style keys we created (or just our added values, if the key pre-existed) ---
+    Remove-EdgePolicyListKeys -State $state -PolicyPath $EdgePolicyPath
 
     if ($perUserHiveReloadedHere) {
         [gc]::Collect()
@@ -1255,19 +1386,6 @@ function Disable-Kiosk {
         if ($LASTEXITCODE -ne 0) {
             Write-Warning "Failed to unload the kiosk user's registry hive after reverting it - it may remain loaded until reboot, which can block that user from signing in."
         }
-    }
-
-    # --- Remove list-style keys we created (or just our added values, if the key pre-existed) ---
-    if (-not $state.UrlBlocklistKeyPreExisted) {
-        Remove-Item -Path "$EdgePolicyPath\URLBlocklist" -Recurse -Force -ErrorAction SilentlyContinue
-    } else {
-        Remove-ItemProperty -Path "$EdgePolicyPath\URLBlocklist" -Name "1" -Force -ErrorAction SilentlyContinue
-    }
-    if (-not $state.UrlAllowlistKeyPreExisted) {
-        Remove-Item -Path "$EdgePolicyPath\URLAllowlist" -Recurse -Force -ErrorAction SilentlyContinue
-    }
-    if (-not $state.RestoreUrlsKeyPreExisted) {
-        Remove-Item -Path "$EdgePolicyPath\RestoreOnStartupURLs" -Recurse -Force -ErrorAction SilentlyContinue
     }
 
     # --- Remove files this script created ---

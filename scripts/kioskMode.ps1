@@ -7,9 +7,10 @@
     via two \Kiosk\ scheduled tasks, whenever the kiosk session is unlocked
     with Edge closed.
     The Edge policies, plus disabling Task Manager and "Change a password" on
-    the Ctrl+Alt+Del screen, are written to the kiosk account's own registry
-    hive (HKU\<SID>\SOFTWARE\Policies\...) - no other account on the machine
-    is affected.
+    the Ctrl+Alt+Del screen and hiding the taskbar's hidden-items arrow and
+    app tray icons, are written to the kiosk account's own registry hives
+    (HKU\<SID>\... and HKU\<SID>_Classes\...) - no other account on the
+    machine is affected.
     If OneAuth isn't already installed for the kiosk account (or provisioned
     for the machine), it's provisioned machine-wide from the Microsoft Store
     via winget.
@@ -418,10 +419,24 @@ $EdgePolicyLists = [ordered]@{
 # endpoint list at runtime (see Enable-Kiosk).
 $EdgeAllowlistKey = "URLAllowlist"
 
-# Per-user Windows policies (kiosk account's hive): no Task Manager and no
-# "Change a password" on the Ctrl+Alt+Del screen.
-$UserSystemPolicySubKey = "Software\Microsoft\Windows\CurrentVersion\Policies\System"
-$UserSystemPolicyNames = @("DisableTaskMgr", "DisableChangePassword")
+# Per-user Windows policies (kiosk account's hive), each set to 1: no Task
+# Manager and no "Change a password" on the Ctrl+Alt+Del screen.
+$UserPolicies = [ordered]@{
+    "Software\Microsoft\Windows\CurrentVersion\Policies\System" = @("DisableTaskMgr", "DisableChangePassword")
+}
+# Taskbar tray (kiosk account): no hidden-items arrow and no app tray icons.
+# The Windows 11 taskbar ignores the legacy HideSCAVolume/HideSCANetwork/
+# NoTrayItemsDisplay policies (confirmed by testing on 25H2), so this uses
+# what Settings > Personalization > Taskbar > Other system tray icons writes
+# instead: "Hidden icon menu" off (SystemTrayChevronVisibility = 0, in the
+# account's classes hive, UsrClass.dat) hides every tray icon not promoted to
+# the taskbar, and each already-promoted icon is demoted (IsPromoted = 0).
+# The network/volume button can't be removed on Windows 11 - it stays, but
+# Assigned Access leaves the kiosk account unable to change anything there.
+# Relative to HKU\<SID>_Classes (= HKCU\Software\Classes).
+$TrayChevronSubKey = "Local Settings\Software\Microsoft\Windows\CurrentVersion\TrayNotify"
+$TrayChevronName = "SystemTrayChevronVisibility"
+$NotifyIconSettingsSubKey = "Control Panel\NotifyIconSettings"
 
 # Machine-wide: the Windows Copilot taskbar button isn't an app pin
 # (CustomTaskbarLayoutCollection/AllowedApps has no effect on it) - it's a
@@ -602,28 +617,33 @@ function Remove-EmptyKey {
 
 function Mount-KioskHive {
     # Makes HKU\<SID> available, loading the account's NTUSER.DAT if it isn't
-    # signed in. Returns $true if it loaded the hive (so Dismount-KioskHive
-    # must unload it again), $false if it was already loaded. Throws if the
-    # account has no profile or the hive won't load.
-    param([string]$Sid)
-    if (Test-Path "Registry::HKEY_USERS\$Sid") { return $false }
+    # signed in - or, with -Classes, HKU\<SID>_Classes from its UsrClass.dat
+    # (where HKCU\Software\Classes lives). Returns $true if it loaded the hive
+    # (so Dismount-KioskHive must unload it again), $false if it was already
+    # loaded. Throws if the account has no profile or the hive won't load.
+    param([string]$Sid, [switch]$Classes)
+    $hiveName = if ($Classes) { "${Sid}_Classes" } else { $Sid }
+    if (Test-Path "Registry::HKEY_USERS\$hiveName") { return $false }
     $profilePath = (Get-CimInstance -ClassName Win32_UserProfile -Filter "SID='$Sid'" -ErrorAction SilentlyContinue).LocalPath
-    $ntUserDat = if ($profilePath) { Join-Path $profilePath "NTUSER.DAT" } else { $null }
-    if (-not ($ntUserDat -and (Test-Path $ntUserDat))) {
-        throw "Could not find a profile (NTUSER.DAT) for SID $Sid - the account must have signed in at least once."
+    $hiveFile = if (-not $profilePath) { $null }
+                elseif ($Classes) { Join-Path $profilePath "AppData\Local\Microsoft\Windows\UsrClass.dat" }
+                else { Join-Path $profilePath "NTUSER.DAT" }
+    if (-not ($hiveFile -and (Test-Path $hiveFile))) {
+        throw "Could not find a profile hive ($(if ($Classes) { 'UsrClass.dat' } else { 'NTUSER.DAT' })) for SID $Sid - the account must have signed in at least once."
     }
-    & reg.exe load "HKU\$Sid" $ntUserDat *> $null
-    if ($LASTEXITCODE -ne 0) { throw "Failed to load the registry hive for SID $Sid." }
+    & reg.exe load "HKU\$hiveName" $hiveFile *> $null
+    if ($LASTEXITCODE -ne 0) { throw "Failed to load the registry hive HKU\$hiveName." }
     return $true
 }
 
 function Dismount-KioskHive {
-    param([string]$Sid)
+    param([string]$Sid, [switch]$Classes)
+    $hiveName = if ($Classes) { "${Sid}_Classes" } else { $Sid }
     [gc]::Collect()
     [gc]::WaitForPendingFinalizers()
-    & reg.exe unload "HKU\$Sid" *> $null
+    & reg.exe unload "HKU\$hiveName" *> $null
     if ($LASTEXITCODE -ne 0) {
-        Write-Warning "Failed to unload the registry hive for SID $Sid - it may remain loaded until reboot, which can block that user from signing in."
+        Write-Warning "Failed to unload the registry hive HKU\$hiveName - it may remain loaded until reboot, which can block that user from signing in."
     }
 }
 
@@ -935,6 +955,7 @@ function Enable-Kiosk {
     $hiveRoot = "Registry::HKEY_USERS\$kioskSid"
     $EdgePolicyPath = "$hiveRoot\$EdgePolicySubKey"
     $script:WrittenValues = @()
+    $classesLoadedHere = $false
 
     $succeeded = $false
     try {
@@ -1083,11 +1104,21 @@ function Enable-Kiosk {
     Set-PolicyValue -Path $CopilotPolicyPath -Name $CopilotPolicyName -Value 1
 
     # --- Power: display off after $DisplayOffMinutes min, never sleep, no
-    # Fast Startup (see $PowerPolicyPath). Not undone on disable. ---
-    foreach ($setting in "monitor-timeout-ac $DisplayOffMinutes", "monitor-timeout-dc $DisplayOffMinutes",
-                         "standby-timeout-ac 0", "standby-timeout-dc 0",
-                         "hibernate-timeout-ac 0", "hibernate-timeout-dc 0") {
-        & powercfg.exe /change @($setting -split ' ') *> $null
+    # Fast Startup (see $PowerPolicyPath). Not undone on disable. powercfg is
+    # only for immediate effect on the first run - once the policy exists it
+    # manages these settings and powercfg /change is refused (exit code 1). ---
+    $powercfgSettings = @()
+    if (-not (Test-Path $PowerPolicyPath)) {
+        $powercfgSettings = "monitor-timeout-ac $DisplayOffMinutes", "monitor-timeout-dc $DisplayOffMinutes",
+                            "standby-timeout-ac 0", "standby-timeout-dc 0",
+                            "hibernate-timeout-ac 0", "hibernate-timeout-dc 0"
+    }
+    foreach ($setting in $powercfgSettings) {
+        # Via cmd so powercfg's stderr never reaches PowerShell: redirecting a
+        # native command's stderr in PowerShell 5.1 under
+        # $ErrorActionPreference = "Stop" turns it into a terminating error
+        # (e.g. on re-runs, once the power policy below manages these settings).
+        & cmd.exe /c "powercfg.exe /change $setting >nul 2>&1"
         if ($LASTEXITCODE -ne 0) { Write-Warning "powercfg /change $setting failed (exit code $LASTEXITCODE) - the power policy below still applies it after a reboot." }
     }
     foreach ($guid in $PowerPolicySettings.Keys) {
@@ -1097,8 +1128,23 @@ function Enable-Kiosk {
     Set-PolicyValue -Path $FastStartupPath -Name $FastStartupName -Value 0
 
     # --- Per-user: disable Task Manager and "Change a password" ---
-    foreach ($name in $UserSystemPolicyNames) {
-        Set-PolicyValue -Path "$hiveRoot\$UserSystemPolicySubKey" -Name $name -Value 1
+    foreach ($subKey in $UserPolicies.Keys) {
+        foreach ($name in $UserPolicies[$subKey]) {
+            Set-PolicyValue -Path "$hiveRoot\$subKey" -Name $name -Value 1
+        }
+    }
+
+    # --- Per-user: no hidden-items arrow or app tray icons (see $TrayChevronSubKey) ---
+    Get-ChildItem -Path "$hiveRoot\$NotifyIconSettingsSubKey" -ErrorAction SilentlyContinue |
+        Where-Object { (Get-ItemProperty -Path $_.PSPath -ErrorAction SilentlyContinue).IsPromoted -eq 1 } |
+        ForEach-Object { Set-PolicyValue -Path "Registry::$($_.Name)" -Name "IsPromoted" -Value 0 }
+    # The classes hive stays loaded until the final re-verification pass has
+    # re-read the value (unloaded in the finally below).
+    try {
+        $classesLoadedHere = Mount-KioskHive -Sid $kioskSid -Classes
+        Set-PolicyValue -Path "Registry::HKEY_USERS\${kioskSid}_Classes\$TrayChevronSubKey" -Name $TrayChevronName -Value 0
+    } catch {
+        Write-Warning "Could not hide the taskbar's hidden-items arrow ($($_.Exception.Message)) - everything else still applies."
     }
 
     # --- Clear any taskbar pins left over from before kiosk mode ---
@@ -1176,6 +1222,7 @@ function Enable-Kiosk {
 
         Write-Error "Enable-Kiosk failed partway through, at line $($_.InvocationInfo.ScriptLineNumber) ($($_.InvocationInfo.Line.Trim())): $detail"
     } finally {
+        if ($classesLoadedHere) { Dismount-KioskHive -Sid $kioskSid -Classes }
         if ($loadedHere) { Dismount-KioskHive -Sid $kioskSid }
     }
 
@@ -1215,10 +1262,23 @@ function Disable-Kiosk {
                 Remove-Item -Path "$EdgePolicyPath\$listName" -Recurse -Force -ErrorAction SilentlyContinue
             }
             Remove-EmptyKey -Path $EdgePolicyPath
-            foreach ($name in $UserSystemPolicyNames) {
-                Remove-PolicyValue -Path "$hiveRoot\$UserSystemPolicySubKey" -Name $name
+            foreach ($subKey in $UserPolicies.Keys) {
+                foreach ($name in $UserPolicies[$subKey]) {
+                    Remove-PolicyValue -Path "$hiveRoot\$subKey" -Name $name
+                }
+                Remove-EmptyKey -Path "$hiveRoot\$subKey"
             }
-            Remove-EmptyKey -Path "$hiveRoot\$UserSystemPolicySubKey"
+            # Bring the hidden-items arrow back (Windows default). Demoted
+            # tray icons stay demoted - they sit behind the arrow as usual.
+            $classesLoadedHere = $false
+            try {
+                $classesLoadedHere = Mount-KioskHive -Sid $kioskSid -Classes
+                Remove-PolicyValue -Path "Registry::HKEY_USERS\${kioskSid}_Classes\$TrayChevronSubKey" -Name $TrayChevronName
+            } catch {
+                Write-Warning "Could not restore the taskbar's hidden-items arrow: $($_.Exception.Message)"
+            } finally {
+                if ($classesLoadedHere) { Dismount-KioskHive -Sid $kioskSid -Classes }
+            }
             # Only while the kiosk layout is applied - otherwise these are the
             # account's own pins. Windows rebuilds its defaults at next sign-in.
             if ($appliedAccount) {

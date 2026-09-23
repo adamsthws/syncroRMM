@@ -34,15 +34,21 @@
     reachable.
 
     USAGE
-      Standalone:   .\kioskMode.ps1 -Enabled true [-KioskUser "AzureAD\user@tenant.com"]
+      Standalone:   .\kioskMode.ps1 -Enabled true -SharePointTenant contoso [-KioskUser "AzureAD\user@tenant.com"]
                     .\kioskMode.ps1 -Enabled false
-      SyncroRMM:    set a script variable named "enabled" to true / false, and
-                    optionally "KioskUser" - both are picked up automatically,
-                    no parameters needed.
+      SyncroRMM:    set script variables named "enabled" (true / false) and
+                    "SharePointTenant", and optionally "KioskUser" - all are
+                    picked up automatically, no parameters needed.
 
-      Both parameters default so that running the script with no arguments at
-      all (either standalone or from Syncro with no variables set) enables
-      kiosk mode for whichever user is currently logged on:
+      -SharePointTenant is the customer's SharePoint prefix - the "contoso" in
+      contoso-my.sharepoint.com. Edge's start page becomes
+      https://<prefix>-my.sharepoint.com/favorites. It's required when
+      enabling and ignored when disabling.
+
+      -Enabled and -KioskUser default so that running the script with only
+      -SharePointTenant (either standalone or from Syncro with only that
+      variable set) enables kiosk mode for whichever user is currently
+      logged on:
         -Enabled    defaults to "true"
         -KioskUser  defaults to "CurrentUser" - whichever user is currently
                     logged on interactively (resolved at runtime). Other
@@ -55,7 +61,7 @@
 
     Must run elevated (SYSTEM or local admin). The kiosk account must have
     signed in at least once. Edit the CONFIGURATION block
-    below (OneAuth AUMID, homepage, allowed domains) before first use.
+    below (OneAuth AUMID, allowed domains) before first use.
 #>
 
 # ===========================================================================
@@ -85,6 +91,13 @@ if ([Environment]::Is64BitOperatingSystem -and -not [Environment]::Is64BitProces
             $relaunchArgs += @('-KioskUser', "$env:KioskUser")
         }
     }
+    if (-not ($relaunchArgs -contains '-SharePointTenant')) {
+        if (Get-Variable -Name SharePointTenant -Scope Global -ErrorAction SilentlyContinue) {
+            $relaunchArgs += @('-SharePointTenant', "$((Get-Variable -Name SharePointTenant -Scope Global).Value)")
+        } elseif ($env:SharePointTenant) {
+            $relaunchArgs += @('-SharePointTenant', "$env:SharePointTenant")
+        }
+    }
     $scriptPath = $PSCommandPath
     if ([string]::IsNullOrWhiteSpace($scriptPath)) { $scriptPath = $MyInvocation.MyCommand.Path }
     if ([string]::IsNullOrWhiteSpace($scriptPath) -or -not (Test-Path $sysnativePwsh)) {
@@ -98,10 +111,12 @@ if ([Environment]::Is64BitOperatingSystem -and -not [Environment]::Is64BitProces
 
 $Enabled = $null
 $KioskUser = $null
+$SharePointTenant = $null
 for ($i = 0; $i -lt $args.Count; $i++) {
     switch -Regex ("$($args[$i])") {
-        '^-Enabled$'   { $Enabled = "$($args[++$i])" }
-        '^-KioskUser$' { $KioskUser = "$($args[++$i])" }
+        '^-Enabled$'          { $Enabled = "$($args[++$i])" }
+        '^-KioskUser$'        { $KioskUser = "$($args[++$i])" }
+        '^-SharePointTenant$' { $SharePointTenant = "$($args[++$i])" }
         default {
             if ($null -eq $Enabled) { $Enabled = "$($args[$i])" }
             elseif ($null -eq $KioskUser) { $KioskUser = "$($args[$i])" }
@@ -115,13 +130,31 @@ for ($i = 0; $i -lt $args.Count; $i++) {
 $ErrorActionPreference = "Stop"
 
 # ===========================================================================
+# Resolve the customer's SharePoint tenant prefix (the "contoso" in
+# contoso-my.sharepoint.com):
+# -SharePointTenant param > pre-existing $SharePointTenant (Syncro) > env var
+# Resolved before CONFIGURATION because the Edge policy tables below are
+# built from it; it's only required when enabling (checked further down).
+# A full URL (e.g. "https://contoso-my.sharepoint.com/favorites") is accepted
+# too and reduced to the prefix.
+# ===========================================================================
+if ([string]::IsNullOrWhiteSpace($SharePointTenant)) {
+    if (Get-Variable -Name SharePointTenant -Scope Global -ErrorAction SilentlyContinue) {
+        $SharePointTenant = (Get-Variable -Name SharePointTenant -Scope Global).Value
+    } elseif ($env:SharePointTenant) {
+        $SharePointTenant = $env:SharePointTenant
+    }
+}
+$SharePointTenant = ("$SharePointTenant").Trim().ToLower() -replace '^https?://', '' -replace '(-my)?\.sharepoint\.com.*$', ''
+
+# ===========================================================================
 # CONFIGURATION - edit before first use
 # ===========================================================================
 $OneAuthAUMID   = "ZohoCorp.44386D730E544_hfrrf6a1akhx2!App"   # Zoho OneAuth
 # Microsoft Store product ID for OneAuth (apps.microsoft.com/detail/<id>) -
 # used to provision it machine-wide via winget if it's missing.
 $OneAuthStoreId = "9NPG98QLH8JN"
-$HomepageUrl    = "https://lbssheet-my.sharepoint.com/favorites"
+$HomepageUrl    = "https://$SharePointTenant-my.sharepoint.com/favorites"
 # Fallback only - used when the live fetch from Microsoft's endpoint list
 # (see Get-M365AllowedDomains below) fails or fails its sanity check AND
 # there is no already-applied allowlist on the machine to fall back to
@@ -367,7 +400,7 @@ $EdgePolicyLists = [ordered]@{
     # save passwords of encrypted Office files opened in the browser. The
     # M365 sign-in page is login.microsoftonline.com, so it's unaffected.
     PasswordManagerBlocklist = @(
-        "https://lbssheet-my.sharepoint.com", "https://lbssheet.sharepoint.com",
+        "https://$SharePointTenant-my.sharepoint.com", "https://$SharePointTenant.sharepoint.com",
         "https://ukc-excel.officeapps.live.com", "https://ukw-excel.officeapps.live.com",
         "https://excel.officeapps.live.com"
     )
@@ -416,6 +449,11 @@ switch (("$Enabled").Trim().ToLower()) {
         Write-Error "Specify -Enabled true|false, or set the Syncro 'enabled' script variable to true/false."
         exit 1
     }
+}
+# Disabling removes Edge policies by name only, so the tenant isn't needed there.
+if ($EnableKiosk -and $SharePointTenant -notmatch '^[a-z0-9][a-z0-9-]*$') {
+    Write-Error "Specify -SharePointTenant <prefix> (e.g. 'contoso' for contoso-my.sharepoint.com), or set the Syncro 'SharePointTenant' script variable."
+    exit 1
 }
 
 # ===========================================================================

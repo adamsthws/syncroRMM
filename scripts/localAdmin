@@ -50,7 +50,7 @@ try {
 
 if ($null -eq $existing) {
     try {
-        New-LocalUser -Name $Username -Password $SecurePassword -PasswordNeverExpires $true -AccountNeverExpires | Out-Null
+        New-LocalUser -Name $Username -Password $SecurePassword -PasswordNeverExpires -AccountNeverExpires | Out-Null
     } catch {
         Write-Error "Failed to create local user '${Username}': $_"
         exit 1

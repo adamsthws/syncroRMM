@@ -3,14 +3,34 @@
 # Will record the status to the asset custom field (You must create an asset custom field named: 'OneDrive Status')
 
 # Limitations: 
-# -Must turn off OnDrive 'files on demand'. If files on-demand is enabled, the script will return an error state. 
-# -The module may get this ability in future, for details, see: https://docs.microsoft.com/en-gb/archive/blogs/rodneyviana/powershell-cmdlet-to-check-onedrive-for-business-or-onedrive-personal-status
+# -Must turn off OnDrive 'files on demand'. If files on-demand is enabled, the script will return an error state. The module may get this ability in future, for details, see: https://docs.microsoft.com/en-gb/archive/blogs/rodneyviana/powershell-cmdlet-to-check-onedrive-for-business-or-onedrive-personal-status
 # -Windows Desktop OS only, dosnt work on Server OS
 
-# By - Adam Matthews - https://github.com/adamsthws
+# By - Adam Matthews - https://unboundedtechnology.com
 # Inspired by Cyberdrain - https://www.cyberdrain.com/monitoring-with-powershell-monitoring-onedrive-status-for-current-logged-on-user/
 
 Import-Module $env:SyncroModule
+
+# Skip machines in kiosk mode (applied by kioskMode.ps1) - the kiosk account uses OneDrive/SharePoint
+# in the browser only, so there's no sync client to monitor. Detected by kioskMode.ps1's Assigned Access
+# profile GUID in the applied config, falling back to the XML file it leaves in C:\ProgramData\Kiosk
+# (removed when kiosk mode is disabled).
+$KioskProfileGuid = "{4c9a1e2b-6f3d-4a8e-9c2f-8b1d5e7a3c90}"
+$KioskXmlPath = Join-Path $env:ProgramData "Kiosk\AssignedAccessConfig.xml"
+$kioskEnabled = $false
+try {
+    $aaObj = Get-CimInstance -Namespace "root\cimv2\mdm\dmmap" -ClassName "MDM_AssignedAccess" -ErrorAction Stop
+    Add-Type -AssemblyName System.Web
+    $aaConfig = [System.Web.HttpUtility]::HtmlDecode($aaObj.Configuration)
+    if ($aaConfig -and $aaConfig.Contains($KioskProfileGuid)) { $kioskEnabled = $true }
+} catch {
+    if (Test-Path $KioskXmlPath) { $kioskEnabled = $true }
+}
+if ($kioskEnabled) {
+    Write-Host "Kiosk mode (kioskMode.ps1) is enabled on this machine - skipping OneDrive health check."
+    Set-Asset-Field -Name "OneDrive Status" -Value "Skipped | Kiosk mode | $(Get-Date -Format 'dd/MM/yy - HH:mm')"
+    exit 0
+}
 
 $Source = @"
 using System;  
@@ -339,4 +359,4 @@ write-host `n $ODerrors
 # Create a Syncro RMM alert if OneDrive is in an error state
 foreach ($ODStat in $ODStatus) {
     if ($ODStat.StatusString -in $ErrorList) { Rmm-Alert -Category "OneDrive Status" -Body "$ODerrors" }
-}typunhea
+}

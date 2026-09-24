@@ -93,7 +93,7 @@ $disableSBoverride = "true"
 
 <# Don't allow users to override SSL certificate warnings.  This is important to avoid MitM attacks.
 ("SSLErrorOverrideAllowed" policy #>
-$disallowSSLoverride = "true"
+$disallowSSLoverride = "false"
 
 
 <# Enforce DNSoverHTTPS (uses Cloudflare DoH)
@@ -176,6 +176,14 @@ $setAllowList = "true"
 <# Chrome extensions: #>
 
 $allowedExtensions = @"
+Vespr Wallet:bedogdpgdnifilpgeianmmdabklhfkcn
+Eternl Wallet:kmhcihpebfmpgmihbkipmjlmmioameka
+Lace Wallet:gafhhkghbfjjkeiendhlofajokpaflmk
+Huntr Job Application Organiser:mihdfbecejheednfigjpdacgeilhlmnf
+Careerflow Job Application Organiser:iadokddofjgcgjpjlfhngclhpmaelnli
+Teal Job Application Organiser:opafjjlpbiaicbbgifbejoochmmeikep
+managejobapplications.com Organiser:hpigdlodflhnfnikfncddglahbbjlclc
+SynthWave Theme:kdanjdeljjimoalfjcjadmcbfkmolmnj
 # Ublock Origin:cjpalhdlnbpafiamejdnhcphjbkeiagm (Manifest v2 depricated)
 Ublock Origin Lite:ddkjiahejlhfcafbddmgiahcphecmpfh
 HTTPSeverywhere:gcbommkclmclpchllfjekcdonpmejbdp
@@ -219,6 +227,7 @@ CiscoWebex:ifbdadgbpalmagalacllfaflfakmfkac
 OneLogin:ioalpmibngobedobkmbhgmadaphocjdn
 Okta Browser Plugin:glnpjglilkicbckjpbgcfkogebgllemb
 Yoroi:ffnbelfdoeiohenkjibnmadjiehjhajb
+Yoroi Nughtly:poonlenmfdfbjfeeballhiibknlknepo
 Chrome Remote Desktop:inomeogfingihgjfjlpeplalcfajhgai
 MetaMask:nkbihfbeogaeaoehlefnkodbefgpgknn
 Microsoft MyApps:ggjhpefgjjfobnfoldnjipclpcfbgbhl
@@ -252,6 +261,30 @@ Okta Browser Plugin:ncoafaeidnkeafiehpkfoeklhajkpgij
 
 
 <# ########### END SETTINGS NO FURTHER MODIFICATION NEEDED ################## #>
+
+
+<# Skip machines in kiosk mode (applied by kioskMode.ps1). The kiosk writes its own
+Edge policies to the kiosk account's hive, and Edge gives HKLM policies precedence
+over those - so hardening here would override the kiosk's settings (e.g.
+PasswordManagerEnabled, DownloadRestrictions). Detected by kioskMode.ps1's Assigned
+Access profile GUID in the applied config, falling back to the XML file it leaves in
+C:\ProgramData\Kiosk (removed when kiosk mode is disabled). #>
+$KioskProfileGuid = "{4c9a1e2b-6f3d-4a8e-9c2f-8b1d5e7a3c90}"
+$KioskXmlPath = Join-Path $env:ProgramData "Kiosk\AssignedAccessConfig.xml"
+$kioskEnabled = $false
+try {
+    $aaObj = Get-CimInstance -Namespace "root\cimv2\mdm\dmmap" -ClassName "MDM_AssignedAccess" -ErrorAction Stop
+    Add-Type -AssemblyName System.Web
+    $aaConfig = [System.Web.HttpUtility]::HtmlDecode($aaObj.Configuration)
+    if ($aaConfig -and $aaConfig.Contains($KioskProfileGuid)) { $kioskEnabled = $true }
+} catch {
+    if (Test-Path $KioskXmlPath) { $kioskEnabled = $true }
+}
+if ($kioskEnabled) {
+    Write-Host "Kiosk mode (kioskMode.ps1) is enabled on this machine - skipping browser hardening so the kiosk's browser policies aren't overridden."
+    Log-Activity -Message "Browser Hardening skipped - machine is in kiosk mode" -EventName "Browser Security"
+    exit 0
+}
 
 
 $ChromeRegistryBase = "HKLM:\Software\Policies\Google\Chrome"

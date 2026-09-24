@@ -39,7 +39,7 @@
     USAGE
       Standalone:   .\kioskMode.ps1 -Enabled true -SharePointTenant contoso [-KioskUser "AzureAD\user@tenant.com"]
                     .\kioskMode.ps1 -Enabled false
-      SyncroRMM:    set script variables named "enabled" (true / false) and
+      SyncroRMM:    set script variables named "enabled" (or "enable") (true / false) and
                     "SharePointTenant", and optionally "KioskUser" - all are
                     picked up automatically, no parameters needed.
 
@@ -63,8 +63,19 @@
                     applied Assigned Access config unless -KioskUser is given.
 
     Must run elevated (SYSTEM or local admin). 
-    The kiosk account must have signed in at least once. 
+    The kiosk account must have signed in at least once.
 #>
+
+# ===========================================================================
+# Syncro script variables arrive as assignments prepended to this file, so
+# they're ordinary script-scope variables (not globals) that are already set
+# by the time this runs. Capture them now, before the argument parsing below
+# resets $Enabled/$KioskUser/$SharePointTenant. Env vars are the fallback.
+# "enable" is accepted as an alias for "enabled".
+# ===========================================================================
+$SyncroEnabled          = if ($null -ne $enabled) { "$enabled" } elseif ($null -ne $enable) { "$enable" } else { $env:enabled }
+$SyncroKioskUser        = if ($null -ne $KioskUser) { "$KioskUser" } else { $env:KioskUser }
+$SyncroSharePointTenant = if ($null -ne $SharePointTenant) { "$SharePointTenant" } else { $env:SharePointTenant }
 
 # ===========================================================================
 # Re-launch under 64-bit PowerShell if we're running as a 32-bit process on a
@@ -79,26 +90,14 @@ if ([Environment]::Is64BitOperatingSystem -and -not [Environment]::Is64BitProces
     Write-Warning "Running as a 32-bit process on a 64-bit OS - re-launching under 64-bit PowerShell so registry writes land in the real (non-WOW6432Node) hive."
     $sysnativePwsh = Join-Path $env:WINDIR "Sysnative\WindowsPowerShell\v1.0\powershell.exe"
     $relaunchArgs = @($args)
-    if (-not ($relaunchArgs -contains '-Enabled')) {
-        if (Get-Variable -Name enabled -Scope Global -ErrorAction SilentlyContinue) {
-            $relaunchArgs += @('-Enabled', "$((Get-Variable -Name enabled -Scope Global).Value)")
-        } elseif ($env:enabled) {
-            $relaunchArgs += @('-Enabled', "$env:enabled")
-        }
+    if (-not ($relaunchArgs -contains '-Enabled') -and $SyncroEnabled) {
+        $relaunchArgs += @('-Enabled', $SyncroEnabled)
     }
-    if (-not ($relaunchArgs -contains '-KioskUser')) {
-        if (Get-Variable -Name KioskUser -Scope Global -ErrorAction SilentlyContinue) {
-            $relaunchArgs += @('-KioskUser', "$((Get-Variable -Name KioskUser -Scope Global).Value)")
-        } elseif ($env:KioskUser) {
-            $relaunchArgs += @('-KioskUser', "$env:KioskUser")
-        }
+    if (-not ($relaunchArgs -contains '-KioskUser') -and $SyncroKioskUser) {
+        $relaunchArgs += @('-KioskUser', $SyncroKioskUser)
     }
-    if (-not ($relaunchArgs -contains '-SharePointTenant')) {
-        if (Get-Variable -Name SharePointTenant -Scope Global -ErrorAction SilentlyContinue) {
-            $relaunchArgs += @('-SharePointTenant', "$((Get-Variable -Name SharePointTenant -Scope Global).Value)")
-        } elseif ($env:SharePointTenant) {
-            $relaunchArgs += @('-SharePointTenant', "$env:SharePointTenant")
-        }
+    if (-not ($relaunchArgs -contains '-SharePointTenant') -and $SyncroSharePointTenant) {
+        $relaunchArgs += @('-SharePointTenant', $SyncroSharePointTenant)
     }
     $scriptPath = $PSCommandPath
     if ([string]::IsNullOrWhiteSpace($scriptPath)) { $scriptPath = $MyInvocation.MyCommand.Path }
@@ -141,11 +140,7 @@ $ErrorActionPreference = "Stop"
 # too and reduced to the prefix.
 # ===========================================================================
 if ([string]::IsNullOrWhiteSpace($SharePointTenant)) {
-    if (Get-Variable -Name SharePointTenant -Scope Global -ErrorAction SilentlyContinue) {
-        $SharePointTenant = (Get-Variable -Name SharePointTenant -Scope Global).Value
-    } elseif ($env:SharePointTenant) {
-        $SharePointTenant = $env:SharePointTenant
-    }
+    $SharePointTenant = $SyncroSharePointTenant
 }
 $SharePointTenant = ("$SharePointTenant").Trim().ToLower() -replace '^https?://', '' -replace '(-my)?\.sharepoint\.com.*$', ''
 
@@ -470,11 +465,7 @@ $EdgeLaunchArguments = "--start-maximized"
 # -Enabled param > pre-existing $enabled (Syncro) > env var > "true"
 # ===========================================================================
 if ([string]::IsNullOrWhiteSpace($Enabled)) {
-    if (Get-Variable -Name enabled -Scope Global -ErrorAction SilentlyContinue) {
-        $Enabled = (Get-Variable -Name enabled -Scope Global).Value
-    } elseif ($env:enabled) {
-        $Enabled = $env:enabled
-    }
+    $Enabled = $SyncroEnabled
 }
 if ([string]::IsNullOrWhiteSpace($Enabled)) {
     $Enabled = "true"
@@ -532,11 +523,7 @@ if ($editionId -match '^Core') {
 # from the applied Assigned Access config.)
 # ===========================================================================
 if ([string]::IsNullOrWhiteSpace($KioskUser)) {
-    if (Get-Variable -Name KioskUser -Scope Global -ErrorAction SilentlyContinue) {
-        $KioskUser = (Get-Variable -Name KioskUser -Scope Global).Value
-    } elseif ($env:KioskUser) {
-        $KioskUser = $env:KioskUser
-    }
+    $KioskUser = $SyncroKioskUser
 }
 if ($EnableKiosk) {
     if ([string]::IsNullOrWhiteSpace($KioskUser)) {
@@ -560,10 +547,11 @@ function Confirm-RegistryValue {
     # Re-reads a value right after writing it. Diagnostic only: catches values
     # silently lost after a successful write, which try/catch can't surface
     # (e.g. New-Item -Force recreating an existing key and wiping its values).
+    # Silent on success - Write-RegistrySummary reports the totals - so the
+    # output stays short enough for Syncro not to truncate it.
     param($Path, $Name, $ExpectedValue)
     $actual = Get-ItemProperty -Path $Path -Name $Name -ErrorAction SilentlyContinue
     if ($actual -and "$($actual.$Name)" -eq "$ExpectedValue") {
-        Write-Host "  [OK] $Path\$Name = $ExpectedValue"
         return $true
     } else {
         $gotStr = if ($actual) { "$($actual.$Name)" } else { "<missing>" }
@@ -593,10 +581,26 @@ function Set-PolicyList {
         $i++
     }
     $count = (Get-Item $Path -ErrorAction SilentlyContinue).Property.Count
-    if ($count -eq $Values.Count) {
-        Write-Host "  [OK] $Path - $count entries verified present immediately after write"
-    } else {
+    if ($count -ne $Values.Count) {
         Write-Warning "  [VERIFY FAILED] $Path - expected $($Values.Count) entries, found $count immediately after write"
+    }
+    # Re-checked once more at the end of Enable-Kiosk.
+    $script:WrittenLists += [PSCustomObject]@{ Path = $Path; Count = $Values.Count }
+}
+
+function Write-RegistrySummary {
+    # One line per registry key written (instead of one per value), with the
+    # kiosk account's hive shortened to HKU\<kiosk>.
+    param([string]$KioskSid)
+    $shorten = { param($p) $p -replace '^Registry::HKEY_USERS\\', 'HKU\' -replace [regex]::Escape($KioskSid), '<kiosk>' }
+    $valueGroups = $script:WrittenValues | Group-Object Path
+    $entryTotal = ($script:WrittenLists | Measure-Object Count -Sum).Sum
+    Write-Host "Registry changes: $($script:WrittenValues.Count) values in $(@($valueGroups).Count) keys, plus $($script:WrittenLists.Count) policy lists ($entryTotal entries):"
+    foreach ($group in $valueGroups) {
+        Write-Host "  $(& $shorten $group.Name): $($group.Count) value(s)"
+    }
+    foreach ($list in $script:WrittenLists) {
+        Write-Host "  $(& $shorten $list.Path): $($list.Count) list entries"
     }
 }
 
@@ -954,6 +958,7 @@ function Enable-Kiosk {
     $hiveRoot = "Registry::HKEY_USERS\$kioskSid"
     $EdgePolicyPath = "$hiveRoot\$EdgePolicySubKey"
     $script:WrittenValues = @()
+    $script:WrittenLists = @()
     $classesLoadedHere = $false
 
     $succeeded = $false
@@ -1175,22 +1180,24 @@ function Enable-Kiosk {
     # everything once more here, after all writes are done, narrows down
     # whether the loss happens during this run or only afterward (at
     # reboot/logon/some later background process).
-    Write-Host "Re-checking all written registry values..."
+    Write-RegistrySummary -KioskSid $kioskSid
     $verifyFailures = 0
     foreach ($written in $script:WrittenValues) {
         if (-not (Confirm-RegistryValue -Path $written.Path -Name $written.Name -ExpectedValue $written.Value)) {
             $verifyFailures++
         }
     }
-    $expectedBlocklistCount = $EdgePolicyLists["URLBlocklist"].Count
-    $finalBlocklistCount = (Get-Item "$EdgePolicyPath\URLBlocklist" -ErrorAction SilentlyContinue).Property.Count
-    $finalAllowlistCount = (Get-Item "$EdgePolicyPath\$EdgeAllowlistKey" -ErrorAction SilentlyContinue).Property.Count
-    Write-Host "  URLBlocklist entries present: $finalBlocklistCount (expected $expectedBlocklistCount)"
-    Write-Host "  URLAllowlist entries present: $finalAllowlistCount (expected $($domainsToApply.Count))"
-    if ($verifyFailures -gt 0 -or $finalBlocklistCount -ne $expectedBlocklistCount -or $finalAllowlistCount -ne $domainsToApply.Count) {
-        Write-Warning "$verifyFailures value(s) and/or the URLBlocklist/URLAllowlist counts no longer match what was just written - something is reverting these registry values during the script run itself, not just afterward."
+    foreach ($list in $script:WrittenLists) {
+        $finalCount = (Get-Item $list.Path -ErrorAction SilentlyContinue).Property.Count
+        if ($finalCount -ne $list.Count) {
+            Write-Warning "  [VERIFY FAILED] $($list.Path) - expected $($list.Count) entries, found $finalCount at the end of the run"
+            $verifyFailures++
+        }
+    }
+    if ($verifyFailures -gt 0) {
+        Write-Warning "$verifyFailures value(s)/list(s) no longer match what was just written - something is reverting these registry values during the script run itself, not just afterward."
     } else {
-        Write-Host "  All written values still present immediately after the run completed."
+        Write-Host "  [OK] All written values and lists re-verified at the end of the run."
     }
 
     $succeeded = $true
